@@ -1,15 +1,15 @@
 # Manifest of the Advantech Linux TSU Yocto project
 The goal of this project is to release opensource Linux source code that runs on Advantech Hardware
 
-## Download the Yocto Linux for ECU-150-12A1 & ECU-150-12A1U and setup environment variables
+## Download the Yocto Linux for ECU-150v2 and setup environment variables
 For downloading the source code and setting up the environment, follow the instructions below:
 ```console
-foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-LinuxTSU-manifest.git -b main -m ecu-150a1-6.6.52-2.2.0.xml
+foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-ECU-150v2-manifest.git -b main -m ecu150v2-6.12.49-2.2.0.xml
 foo@bar:~/yocto$ repo sync
-foo@bar:~/yocto$ MACHINE=imx8mq-ecu150a1 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b build
-foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-ecu-150a1/
+foo@bar:~/yocto$ MACHINE=ecu150v2 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b build
+foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-ecu-150v2/
 ```
-After the commands, not only was the Yocto project for ECU-150-A1 downloaded, the operating console were also setup to operate bitbaker.
+After the commands, not only was the Yocto project for ECU-150v2 downloaded, the operating console were also setup to operate bitbaker.
 Please also notice, that after the commands, your current position has been changed to the build directory!
 If, in the future, to operate bitbake from another console; in that spacific console, use the command:
 ```console
@@ -39,9 +39,9 @@ In a console that has been setup properly, use the following command to build Li
 foo@bar:~/yocto/build$ bitbake core-image-minimal
 
 ```
-- The __Linux kernel__ will be located at : __./build/tmp/deploy/images/imx8mq-ecu150a1/Image__
-- The __dtb__ will be located at: __./build/tmp/deploy/images/imx8mq-ecu150a1/fsl-imx8mq-ecu150a1.dtb__
-- The __rootfs__ will be located at: __./build/tmp/deploy/images/imx8mq-ecu150a1/core-image-minimal-imx8mq-ecu150a1.rootfs.tar.gz__
+- The __Linux kernel__ will be located at : __./build/tmp/deploy/images/iecu150v2/Image__
+- The __dtb__ will be located at: __./build/tmp/deploy/images/ecu150v2/fsl-ecu150v2.dtb__
+- The __rootfs__ will be located at: __./build/tmp/deploy/images/ecu150v2/core-image-minimal-ecu150v2.rootfs.tar.gz__
 
 To build only the Linux kernel, use the following command instead:
 ```console
@@ -54,19 +54,19 @@ To create a bootable SD card, use the following commands:
 >  __BEWARE!!!__ The following example assumes that the __SD card__ was located as **/dev/sdb**, change the location accordingly. otherwise, /dev/sdb would be ruined.
 
 > [!NOTE]
->  1. The wic image could be found at ./build/tmp/deploy/images/imx7mq-ecu150a1/core-image-minimal-imx8mq-ecu150a1.rootfs-*.wic.gz
+>  1. The wic image could be found at ./build/tmp/deploy/images/ecu150v2/core-image-minimal-ecu150v2.rootfs-*.wic.gz
 >  2. To deploy the image to the on board EMMC, copy the wic.gz file to the __root/__ partition on the SD, boot from SD and follow the same commands with the following parameters swapped out:
 >        1. __/dev/sdb__ swapped to __/dev/mmcblk0__
 >        2. __/dev/sdb2__ swapped to __/dev/mmcblk0p2__
 >  3. Use the on board hardware switch __SW2__ to select between the boot devices.
 
 ```console
-foo@bar:~/yocto/build/tmp/deploy/images/imx8mq-ecu150a1/$ gunzip -c ./core-image-minimal-imx8mq-ecu150a1.rootfs-*.wic.gz | sudo dd of=/dev/sdb bs=1M iflag=fullblock oflag=direct conv=fsync
+foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2/$ gunzip -c ./core-image-minimal-ecu150v2.rootfs-*.wic.gz | sudo dd of=/dev/sdb bs=1M iflag=fullblock oflag=direct conv=fsync
 1181+1 records in
 1181+1 records out
 1238877184 bytes (1.2 GB, 1.2 GiB) copied, 73.1945 s, 16.9 MB/s
-foo@bar:~/yocto/build/tmp/deploy/images/imx8mq-ecu150a1$ sudo parted -s -a opt /dev/sdb "resizepart 2 100%"
-foo@bar:~/yocto/build/tmp/deploy/images/imx8mq-ecu150a1$ sudo e2fsck -f /dev/sdb2 
+foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo parted -s -a opt /dev/sdb "resizepart 2 100%"
+foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo e2fsck -f /dev/sdb2 
 e2fsck 1.47.0 (5-Feb-2023)
 Pass 1: Checking inodes, blocks, and sizes
 Pass 2: Checking directory structure
@@ -74,68 +74,16 @@ Pass 3: Checking directory connectivity
 Pass 4: Checking reference counts
 Pass 5: Checking group summary information
 root: 16790/107296 files (0.1% non-contiguous), 126901/214396 blocks
-foo@bar:~/yocto/build/tmp/deploy/images/imx8mq-ecu150a1$ sudo resize2fs /dev/sdb2
+foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo resize2fs /dev/sdb2
 resize2fs 1.47.0 (5-Feb-2023)
 Resizing the filesystem on /dev/sdb2 to 7545600 (4k) blocks.
 The filesystem on /dev/sdb2 is now 7545600 (4k) blocks long.
-```
-## Programmable LEDs and Watchdog Timer
-The Programmable LEDs and Watch Dog Timer are accessed via GPIO; therefore, it should be accessed via the standard libGPIOD API.
-```console
-root@imx8mq-ecu150a1:~/$ gpioinfo
-...
-gpiochip3 - 32 lines:
-        ...
-        line   11:    "WDT_EN"       unused   input  active-high
-        ...
-        line   20:       "WDT"       unused   input  active-high
-gpiochip4 - 32 lines:
-        line   0:      unnamed       unused   input  active-high
-        line   1:      unnamed       unused   input  active-high
-        line   2:      unnamed       unused   input  active-high
-        line   3:        "PL1"       unused   input  active-high
-        line   4:        "PL2"       unused   input  active-high
-        line   5:        "PL3"       unused   input  active-high
-...
-root@imx8mq-ecu150a1:~/$ gpioset -t0 PL1=1	//switch on Programmable LED 1
-root@imx8mq-ecu150a1:~/$ gpioset -t0 PL1=0        //switch off Programmable LED 1
-```
-The following bash-script gives an idea on how the watchdog timer could be enabled and updated.
-Run the script and terminate it with control-c and the WDT will reset the system.
-```sh
-#!/bin/bash
-i=0
-# clear the wdt a few times before enabling it.
-# It has left alone for too long,
-# enabling it right away will reset the system immediately.
-for j in {0..5}
-do
-	gpioset -t0 WDT=$i
-	if [ $i -eq 0 ]; then 
-		i=1
-	else
-		i=0
-	fi
-	sleep 0.3
-done
-# enable the wdt
-gpioset -t0 WDT_EN=0
-while true
-do
-	gpioset -t0 WDT=$i
-	if [ $i -eq 0 ]; then 
-		i=1
-	else
-		i=0
-	fi
-	sleep 0.3
-done
 ```
 
 ## Create SDK for Yocto
 ```console
 foo@bar:~/yocto/build$ bitbake -c populate_sdk core-image-minimal
-foo@bar:~/yocto/build$ sh ./tmp/deploy/sdk/fsl-imx-xwayland-glibc-x86_64-core-image-minimal-armv8a-imx8mq-ecu150a1-toolchain-6.6-scarthgap.sh
+foo@bar:~/yocto/build$ sh ./tmp/deploy/sdk/fsl-imx-xwayland-glibc-x86_64-core-image-minimal-armv8a-ecu150v2-toolchain-6.6-scarthgap.sh
 NXP i.MX Release Distro SDK installer version 6.6-scarthgap
 ===========================================================
 Enter target directory for SDK (default: /opt/fsl-imx-xwayland/6.6-scarthgap): ~/my_sdk
@@ -274,7 +222,7 @@ fi
 ### Debian 12 
 ```console
 foo@bar:~/work$ sudo debootstrap --arch arm64 bookworm my_rootfs http://deb.debian.org/debian
-foo@bar:~/work$ sudo tar xvf ./modules-imx8mq-ecu150a1.tgz -C ./my_rootfs/usr/
+foo@bar:~/work$ sudo tar xvf ./modules-ecu150v2.tgz -C ./my_rootfs/usr/
 foo@bar:~/work$ cp firmware-imx-sdma-imx7d*.deb ./my_rootfs/tmp/
 foo@bar:~/work$ cp linux-firmware-rtl*.deb ./my_rootfs/tmp/
 foo@bar:~/work$ cp linux-firmware-whence-license_*.deb ./my_rootfs/tmp/
@@ -288,7 +236,7 @@ root@imx:~/$ rm /tmp/*
 ### Ubuntu 24.04
 ```console
 foo@bar:~/work$ sudo debootstrap --arch arm64 noble my_rootfs http://tw.archive.ubuntu.com/ubuntu/
-foo@bar:~/work$ sudo tar xvf ./modules-imx8mq-ecu150a1.tgz -C ./my_rootfs/usr/
+foo@bar:~/work$ sudo tar xvf ./modules-ecu150v2.tgz -C ./my_rootfs/usr/
 foo@bar:~/work$ cp firmware-imx-sdma-imx7d*.deb ./my_rootfs/tmp/
 foo@bar:~/work$ cp linux-firmware-rtl*.deb ./my_rootfs/tmp/
 foo@bar:~/work$ cp linux-firmware-whence-license_*.deb ./my_rootfs/tmp/
@@ -309,7 +257,7 @@ root@imx:~/$ usermod -aG sudo admin
 The following instructions can be shared between two target distros.
 ```console
 root@imx:~/$ ln -s /dev/null /etc/systemd/network/99-default.link
-root@imx:~/$ echo 'imx8mq-ecu150a1' > /etc/hostname
+root@imx:~/$ echo 'ecu150v2' > /etc/hostname
 root@imx:~/$ cat <<EOF >> /etc/udev/rules.d/localextra.rules
 # Microchip Technology USB2740 Hub
 KERNEL=="rtc1", SYMLINK+="rtc"
@@ -395,10 +343,10 @@ RAUC requires X.509 certificates to sign and verify Bundles:
 foo@bar:~/yocto/sources/meta-rauc$ ./scripts/openssl-ca.sh
 ```
 Generated files:
-- `ca.cert.pem` → Copy to `meta-ecu-150a1/recipes-core/rauc/files/`
+- `ca.cert.pem` → Copy to `meta-ecu-150v2/recipes-core/rauc/files/`
 - `ca.key.pem` → Keep secure (do not add to version control)
-- `development-1.cert.pem` → Copy to `meta-ecu-150a1/recipes-core/bundles/files/`
-- `development-1.key.pem` → Copy to `meta-ecu-150a1/recipes-core/bundles/files/`
+- `development-1.cert.pem` → Copy to `meta-ecu-150v2/recipes-core/bundles/files/`
+- `development-1.key.pem` → Copy to `meta-ecu-150v2/recipes-core/bundles/files/`
 
 ### Enable RAUC and Build
 Edit `conf/local.conf` to enable RAUC:
@@ -410,22 +358,22 @@ foo@bar:~/yocto/build$ bitbake core-image-minimal
 ### Build RAUC Bundle (OTA Update Package)
 ```console
 foo@bar:~/yocto/build$ bitbake update-bundle
-foo@bar:~/yocto/build$ ls tmp/deploy/images/imx8mq-ecu150a1/*.raucb
+foo@bar:~/yocto/build$ ls tmp/deploy/images/ecu150v2/*.raucb
 ```
 
 >[!Note]
 >__Creating a RAUC Bundle with SecureBoot__  
->Make sure the parameter `RAUC_SLOT_rootfs` in `meta-ecu-150a1/recipes-core/bundles/update-bundle.bb` matches the rootfs image name. e.g. for `core-image-minimal-secure-boot-imx8mq-ecu150a1.rootfs.tar.gz`, set `RAUC_SLOT_rootfs = "core-image-minimal-secure-boot"`.
+>Make sure the parameter `RAUC_SLOT_rootfs` in `meta-ecu-150v2/recipes-core/bundles/update-bundle.bb` matches the rootfs image name. e.g. for `core-image-minimal-secure-boot-imx8mp-ecu150v2.rootfs.tar.gz`, set `RAUC_SLOT_rootfs = "core-image-minimal-secure-boot"`.
 
 ### Using RAUC on the Development Board
 Check RAUC status:
 ```console
-root@imx8mq-ecu150a1:~$ rauc status
+root@ecu150v2:~$ rauc status
 ```
 Install OTA update:
 ```console
-root@imx8mq-ecu150a1:~$ rauc install /tmp/update-bundle-*.raucb
-root@imx8mq-ecu150a1:~$ reboot
+root@ecu150v2:~$ rauc install /tmp/update-bundle-*.raucb
+root@ecu150v2:~$ reboot
 ```
 
 ## Create Secure Boot Images
@@ -480,7 +428,7 @@ SRK_1_2_3_4_fuse.bin  SRK_1_2_3_4_table.bin
 
 3. Make core-image-minimal-secure-boot.bbappend.disabled enabled by modifying file extension from .bbappend.disabled to .bbappend
 ```console
-foo@bar:~/yocto/sources/meta-ecu-150a1/recipes-core/core-image$ mv core-image-minimal-secure-boot.bbappend.disabled core-image-minimal-secure-boot.bbappend
+foo@bar:~/yocto/sources/meta-ecu-150v2/recipes-core/core-image$ mv core-image-minimal-secure-boot.bbappend.disabled core-image-minimal-secure-boot.bbappend
 ```
 
 4. Add & setup the "security reference design" meta-layer to the yocto project.
