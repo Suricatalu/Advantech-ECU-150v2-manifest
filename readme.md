@@ -6,15 +6,15 @@ For downloading the source code and setting up the environment, follow the instr
 ```console
 foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-ECU-150v2-manifest.git -b main -m ecu150v2-6.12.49-2.2.0.xml
 foo@bar:~/yocto$ repo sync
-foo@bar:~/yocto$ MACHINE=ecu150v2 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b build
-foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-ecu-150v2/
+foo@bar:~/yocto$ MACHINE=ecu150v2 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b bld-wayland
+foo@bar:~/yocto/bld-wayland$ bitbake-layers add-layer ../sources/meta-ecu-150v2/
 ```
 After the commands, not only was the Yocto project for ECU-150v2 downloaded, the operating console were also setup to operate bitbaker.
 Please also notice, that after the commands, your current position has been changed to the build directory!
 If, in the future, to operate bitbake from another console; in that spacific console, use the command:
 ```console
-foo@bar:~/yocto$ source ./setup-environment build
-foo@bar:~/yocto/build$
+foo@bar:~/yocto$ source ./setup-environment bld-wayland
+foo@bar:~/yocto/bld-wayland$
 ```
 ## Build Yocto
 >[!NOTE]
@@ -28,7 +28,7 @@ foo@bar:~/yocto/build$
 > Building Yocto, with the default configure, is very memory consuming. At least 32 GBytes of RAM will be needed.  
 > With insufficient RAM, the building process will fail.
 > Therefore, limiting the maximum parallel processes allowed, migth be a good idea.
-> One may do so by adding the following parameters to **"build/config/local.conf"**
+> One may do so by adding the following parameters to **"bld-wayland/config/local.conf"**
 > ```sh
 > PARALLEL_MAKE = "-j 2"
 > BB_NUMBER_THREADS = "2"
@@ -36,16 +36,17 @@ foo@bar:~/yocto/build$
 
 In a console that has been setup properly, use the following command to build Linux and the Yocto rootfs
 ```console
-foo@bar:~/yocto/build$ bitbake core-image-minimal
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
 
 ```
-- The __Linux kernel__ will be located at : __./build/tmp/deploy/images/iecu150v2/Image__
-- The __dtb__ will be located at: __./build/tmp/deploy/images/ecu150v2/fsl-ecu150v2.dtb__
-- The __rootfs__ will be located at: __./build/tmp/deploy/images/ecu150v2/core-image-minimal-ecu150v2.rootfs.tar.gz__
+- The __Linux kernel__ will be located at: __./bld-wayland/tmp/deploy/images/ecu150v2/Image__
+- The __dtb__ will be located at: __./bld-wayland/tmp/deploy/images/ecu150v2/imx8mp-evk-ecu150v2.dtb__
+- The __rootfs (tar)__ will be located at: __./bld-wayland/tmp/deploy/images/ecu150v2/imx-image-core-ecu150v2.rootfs.tar.zst__
+- The __imx-boot (SPL + U-Boot + ATF + OP-TEE)__ will be located at: __./bld-wayland/tmp/deploy/images/ecu150v2/imx-boot-ecu150v2-sd.bin-flash_evk__
 
 To build only the Linux kernel, use the following command instead:
 ```console
-foo@bar:~/yocto/build$ bitbake linux-imx
+foo@bar:~/yocto/bld-wayland$ bitbake linux-imx
 ```
 ## Deploy the Yocto Image
 The easiest way to delpy the yocto image is to dump the wic file to a SD card.  
@@ -54,36 +55,40 @@ To create a bootable SD card, use the following commands:
 >  __BEWARE!!!__ The following example assumes that the __SD card__ was located as **/dev/sdb**, change the location accordingly. otherwise, /dev/sdb would be ruined.
 
 > [!NOTE]
->  1. The wic image could be found at ./build/tmp/deploy/images/ecu150v2/core-image-minimal-ecu150v2.rootfs-*.wic.gz
->  2. To deploy the image to the on board EMMC, copy the wic.gz file to the __root/__ partition on the SD, boot from SD and follow the same commands with the following parameters swapped out:
+>  1. The wic image could be found at `./bld-wayland/tmp/deploy/images/ecu150v2/imx-image-core-ecu150v2.rootfs.wic.zst`
+>     A `.bmap` file is also generated alongside it for use with `bmaptool`.
+>  2. To deploy the image to the on board EMMC, copy the wic.zst file to the __root/__ partition on the SD, boot from SD and follow the same commands with the following parameters swapped out:
 >        1. __/dev/sdb__ swapped to __/dev/mmcblk0__
 >        2. __/dev/sdb2__ swapped to __/dev/mmcblk0p2__
 >  3. Use the on board hardware switch __SW2__ to select between the boot devices.
 
 ```console
-foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2/$ gunzip -c ./core-image-minimal-ecu150v2.rootfs-*.wic.gz | sudo dd of=/dev/sdb bs=1M iflag=fullblock oflag=direct conv=fsync
-1181+1 records in
-1181+1 records out
-1238877184 bytes (1.2 GB, 1.2 GiB) copied, 73.1945 s, 16.9 MB/s
-foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo parted -s -a opt /dev/sdb "resizepart 2 100%"
-foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo e2fsck -f /dev/sdb2 
+foo@bar:~/yocto/bld-wayland/tmp/deploy/images/ecu150v2$ sudo bmaptool copy imx-image-core-ecu150v2.rootfs.wic.zst /dev/sdb
+bmaptool: info: 628149 blocks of size 4096 (2.4 GiB), mapped 335669 blocks (1.3 GiB or 53.4%)
+bmaptool: info: copying image 'imx-image-core-ecu150v2.rootfs.wic.zst' to block device '/dev/sdb' using bmap file 'imx-image-core-ecu150v2.rootfs.wic.bmap'
+bmaptool: info: copying time: 1m 2.0s, copying speed 21.2 MiB/sec
+foo@bar:~/yocto/bld-wayland/tmp/deploy/images/ecu150v2$ sudo parted -s -a opt /dev/sdb "resizepart 2 100%"
+foo@bar:~/yocto/bld-wayland/tmp/deploy/images/ecu150v2$ sudo e2fsck -f /dev/sdb2
 e2fsck 1.47.0 (5-Feb-2023)
 Pass 1: Checking inodes, blocks, and sizes
 Pass 2: Checking directory structure
 Pass 3: Checking directory connectivity
 Pass 4: Checking reference counts
 Pass 5: Checking group summary information
-root: 16790/107296 files (0.1% non-contiguous), 126901/214396 blocks
-foo@bar:~/yocto/build/tmp/deploy/images/ecu150v2$ sudo resize2fs /dev/sdb2
+root: 27957/280512 files (0.1% non-contiguous), 343501/560564 blocks
+foo@bar:~/yocto/bld-wayland/tmp/deploy/images/ecu150v2$ sudo resize2fs /dev/sdb2
 resize2fs 1.47.0 (5-Feb-2023)
-Resizing the filesystem on /dev/sdb2 to 7545600 (4k) blocks.
-The filesystem on /dev/sdb2 is now 7545600 (4k) blocks long.
+Resizing the filesystem on /dev/sdb2 to 15292416 (4k) blocks.
+The filesystem on /dev/sdb2 is now 15292416 (4k) blocks long.
 ```
 
 ## Create SDK for Yocto
+> This section sets up the Yocto cross-compilation SDK on your host (x86) machine.
+> It generates a standalone toolchain (compiler, sysroot, kernel headers) targeting the ECU150v2 (armv8a).
+> Once installed and sourced, you can compile binaries or out-of-tree kernel modules on the host that run on the target board.
 ```console
-foo@bar:~/yocto/build$ bitbake -c populate_sdk core-image-minimal
-foo@bar:~/yocto/build$ sh ./tmp/deploy/sdk/fsl-imx-xwayland-glibc-x86_64-core-image-minimal-armv8a-ecu150v2-toolchain-6.6-scarthgap.sh
+foo@bar:~/yocto/bld-wayland$ bitbake -c populate_sdk core-image-minimal
+foo@bar:~/yocto/bld-wayland$ sh ./tmp/deploy/sdk/fsl-imx-xwayland-glibc-x86_64-core-image-minimal-armv8a-ecu150v2-toolchain-6.6-scarthgap.sh
 NXP i.MX Release Distro SDK installer version 6.6-scarthgap
 ===========================================================
 Enter target directory for SDK (default: /opt/fsl-imx-xwayland/6.6-scarthgap): ~/my_sdk
@@ -93,8 +98,8 @@ Setting it up...done
 SDK has been successfully set up and is ready to be used.
 Each time you wish to use the SDK in a new shell session, you need to source the environment setup script e.g.
  $ . /home/foo/my_sdk/environment-setup-armv8a-poky-linux
-foo@bar:~/yocto/build$ . /home/foo/my_sdk/environment-setup-armv8a-poky-linux
-foo@bar:~/yocto/build$ make modules_prepare -C $SDKTARGETSYSROOT/usr/src/kernel
+foo@bar:~/yocto/bld-wayland$ . /home/foo/my_sdk/environment-setup-armv8a-poky-linux
+foo@bar:~/yocto/bld-wayland$ make modules_prepare -C $SDKTARGETSYSROOT/usr/src/kernel
 
 ```
 ## Build out-of-tree kernel modules
@@ -111,7 +116,7 @@ foo@bar:~/example/USB-4604-BE-linux-driver$ cat ./Makefile
 obj-m := adv_usb_serial.o
 adv_usb_serial-objs := xr_usb_serial_common.o
 
-KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+KERNELDIR ?= /lib/modules/$(shell uname -r)/bld-wayland
 PWD       := $(shell pwd)
 
 EXTRA_CFLAGS	:= -DDEBUG=0
@@ -131,29 +136,29 @@ foo@bar:~/example/USB-4604-BE-linux-driver$ make
 To modify/develop the in-tree kernel source code, the **devtool** command provided by Yocto is a good base to start.
 The following command will prepare a kernel source tree, which is managed by git, under **"build/workspace/sources/linux-imx"**.
 ```console
-foo@bar:~/yocto/build$ devtool modify linux-imx
-foo@bar:~/yocto/build$ ls ./workspace/sources/
+foo@bar:~/yocto/bld-wayland$ devtool modify linux-imx
+foo@bar:~/yocto/bld-wayland$ ls ./workspace/sources/
 linux-imx
 ```
 To test the modified source code, build the modified kernel with the following command.
 ```console
-foo@bar:~/yocto/build$ devtool build linux-imx
+foo@bar:~/yocto/bld-wayland$ devtool build linux-imx
 ```
 To modify the default configure, use the following command.
 ```console
-foo@bar:~/yocto/build$ devtool menuconfig  linux-imx
+foo@bar:~/yocto/bld-wayland$ devtool menuconfig  linux-imx
 ```
 During the process, use **"git add, git commit"** to source-control the development.
-To save all the changes controled by git into a new layer, use the following commands
+To save all the changes controlled by git into a new layer, use the following commands
 ```console
-foo@bar:~/yocto/build$ bitbake-layers create-layer ../sources/meta-mylayer
-foo@bar:~/yocto/build$ devtool update-recipe -a ../sources/meta-mylayer linux-imx
+foo@bar:~/yocto/bld-wayland$ bitbake-layers create-layer ../sources/meta-mylayer
+foo@bar:~/yocto/bld-wayland$ devtool update-recipe -a ../sources/meta-mylayer linux-imx
 ```
 To finish the process, use the following procedure to clean the current workspace and add the newly created layer to the yocto project.
 ```console
-foo@bar:~/yocto/build$ devtool reset linux-imx
-foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-mylayer/
-foo@bar:~/yocto/build$ bitbake linux-imx
+foo@bar:~/yocto/bld-wayland$ devtool reset linux-imx
+foo@bar:~/yocto/bld-wayland$ bitbake-layers add-layer ../sources/meta-mylayer/
+foo@bar:~/yocto/bld-wayland$ bitbake linux-imx
 ```
 
 ## Build Debian/Ubuntu based rootfs
@@ -260,11 +265,10 @@ root@imx:~/$ ln -s /dev/null /etc/systemd/network/99-default.link
 root@imx:~/$ echo 'ecu150v2' > /etc/hostname
 root@imx:~/$ cat <<EOF >> /etc/udev/rules.d/localextra.rules
 # Microchip Technology USB2740 Hub
-KERNEL=="rtc1", SYMLINK+="rtc"
+KERNEL=="rtc0", SYMLINK+="rtc"    # External RTC is exposed as /dev/rtc0
 
 KERNEL=="ttymxc2", GROUP="dialout", MODE="0664", SYMLINK+="ttyAP0"
 KERNEL=="ttymxc3", GROUP="dialout", MODE="0664", SYMLINK+="ttyAP1"
-KERNEL=="fram0", GROUP="dialout", MODE="0664", SYMLINK+="fram"
 EOF
 root@imx:~/$ systemctl enable systemd-networkd.service
 root@imx:~/$ systemctl enable systemd-resolved.service
@@ -324,179 +328,4 @@ resize() {
     fi
 fi
 
-```
-
-## Enable RAUC Function
-RAUC is a Linux-level OTA update system that provides A/B partition switching and rollback mechanisms.
-
-### Add meta-rauc Layer
-```console
-foo@bar:~/yocto/sources$ git clone https://github.com/rauc/meta-rauc.git
-foo@bar:~/yocto/sources$ cd meta-rauc
-foo@bar:~/yocto/sources/meta-rauc$ git checkout scarthgap
-foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-rauc
-```
-
-### Generate RAUC Certificates
-RAUC requires X.509 certificates to sign and verify Bundles:
-```console
-foo@bar:~/yocto/sources/meta-rauc$ ./scripts/openssl-ca.sh
-```
-Generated files:
-- `ca.cert.pem` → Copy to `meta-ecu-150v2/recipes-core/rauc/files/`
-- `ca.key.pem` → Keep secure (do not add to version control)
-- `development-1.cert.pem` → Copy to `meta-ecu-150v2/recipes-core/bundles/files/`
-- `development-1.key.pem` → Copy to `meta-ecu-150v2/recipes-core/bundles/files/`
-
-### Enable RAUC and Build
-Edit `conf/local.conf` to enable RAUC:
-```console
-foo@bar:~/yocto/build$ vim ./conf/local.conf    # add RAUC_ENABLED = "1"
-foo@bar:~/yocto/build$ bitbake core-image-minimal
-```
-
-### Build RAUC Bundle (OTA Update Package)
-```console
-foo@bar:~/yocto/build$ bitbake update-bundle
-foo@bar:~/yocto/build$ ls tmp/deploy/images/ecu150v2/*.raucb
-```
-
->[!Note]
->__Creating a RAUC Bundle with SecureBoot__  
->Make sure the parameter `RAUC_SLOT_rootfs` in `meta-ecu-150v2/recipes-core/bundles/update-bundle.bb` matches the rootfs image name. e.g. for `core-image-minimal-secure-boot-imx8mp-ecu150v2.rootfs.tar.gz`, set `RAUC_SLOT_rootfs = "core-image-minimal-secure-boot"`.
-
-### Using RAUC on the Development Board
-Check RAUC status:
-```console
-root@ecu150v2:~$ rauc status
-```
-Install OTA update:
-```console
-root@ecu150v2:~$ rauc install /tmp/update-bundle-*.raucb
-root@ecu150v2:~$ reboot
-```
-
-## Create Secure Boot Images
-To create secure boot images, the first step would be setting up the CST tool, provided by NXP.  
-
-1. Download the Code-Singing-Tool From NXP:https://www.nxp.com/webapp/Download?colCode=IMX_CST_TOOL_NEW&appType=license  
-2. Create fuse.bin and table.bin
-```console
-foo@bar:~/Download$ cd ./cst-3.4.0/keys
-foo@bar:~/Download/cst-3.4.0/keys$ vi serial
-12345678
-foo@bar:~/Download/cst-3.4.0/keys$ vi key_pass.txt 
-my_pass_phrase
-my_pass_phrase
-foo@bar:~/Download/cst-3.4.0/keys$ ./hab4_pki_tree.sh
-...
-Do you want to use an existing CA key (y/n)?: n
-
-Key type options (confirm targeted device supports desired key type):
-Select the key type (possible values: rsa, rsa-pss, ecc)?: rsa
-Enter key length in bits for PKI tree: 2048
-Enter PKI tree duration (years): 10
-How many Super Root Keys should be generated? 1
-Do you want the SRK certificates to have the CA flag set? (y/n)?: y
-...
-foo@bar:~/Download/cst-3.4.0/keys$ ls SRK*
-SRK1_sha256_2048_65537_v3_ca_key.der  SRK1_sha256_2048_65537_v3_ca_key.pem
-
-foo@bar:~/Download/cst-3.4.0/keys$ cd ../crts/
-foo@bar:~/Download/cst-3.4.0/crts$ ../linux64/bin/srktool -h 4 -t SRK_1_2_3_4_table.bin \
-    -e SRK_1_2_3_4_fuse.bin -d sha256 -c \
-    ./SRK1_sha256_2048_65537_v3_ca_crt.pem, \
-    ./SRK2_sha256_2048_65537_v3_ca_crt.pem, \
-    ./SRK3_sha256_2048_65537_v3_ca_crt.pem, \
-    ./SRK4_sha256_2048_65537_v3_ca_crt.pem -f 1
-Number of certificates    = 1
-SRK table binary filename = SRK_1_2_3_4_table.bin
-SRK Fuse binary filename  = SRK_1_2_3_4_fuse.bin
-SRK Fuse binary dump:
-SRK HASH[0] = 0x3D06A4A9
-SRK HASH[1] = 0x4BC55D12
-SRK HASH[2] = 0xA5F45E7F
-SRK HASH[3] = 0x1F1F68FC
-SRK HASH[4] = 0x3B9B4AE8
-SRK HASH[5] = 0xFC658293
-SRK HASH[6] = 0x40A706C9
-SRK HASH[7] = 0x94A9139E
-
-foo@bar:~/Download/cst-3.4.0/keys$ ls SRK_*
-SRK_1_2_3_4_fuse.bin  SRK_1_2_3_4_table.bin
-```
-
-3. Make core-image-minimal-secure-boot.bbappend.disabled enabled by modifying file extension from .bbappend.disabled to .bbappend
-```console
-foo@bar:~/yocto/sources/meta-ecu-150v2/recipes-core/core-image$ mv core-image-minimal-secure-boot.bbappend.disabled core-image-minimal-secure-boot.bbappend
-```
-
-4. Add & setup the "security reference design" meta-layer to the yocto project.
-```console
-foo@bar:~/yocto$ source ./setup-environment build
-foo@bar:~/yocto/build$ bitbake-layers add-layer ../sources/meta-nxp-reference-design/meta-secure-boot
-foo@bar:~/yocto/build$ vim ./conf/local.conf     #add    CST_PATH = "<absolute path to cst-3.4.0 folder>"
-```
-5. Use one of the following commands to build the desired signed image:
-```console
-foo@bar:~/yocto/build$ bitbake core-image-minimal-secure-boot
-foo@bar:~/yocto/build$ bitbake imx-boot-signature                # for building a signed uboot only
-foo@bar:~/yocto/build$ bitbake linux-imx-signature               # for building a signed linux only
-```
-## Program eFUSE
-In the "cst-3.4.0/keys" folder, extract the values needed to program the eFUSE.
-```console
-foo@bar:~/Download/cst-3.4.0/keys$ hexdump -e '/4 "0x"' -e '/4 "%X""\n"' SRK_1_2_3_4_fuse.bin
-0x9A842534
-0xB0491AB4
-0xD5B6A07B
-0xFD92DCE7
-0xC10DC87C
-0xD8BD04A9
-0x704E9FE4
-0x9B025359
-```
-On a ECU device running the signed uboot, check the HAB status:
-```console
-u-boot=> hab_status
-Secure boot disabled
-HAB Configuration: 0xf0, HAB State:
-0x66
-No HAB Events Found!
-```
-> ### Warning! for each CPU, the fuse can only be programmed once
-Burn the eFUSE with the values extracted from the previous command:
-```console
-u-boot=> fuse prog 6 0 0x9A842534
-u-boot=> fuse prog 6 1 0xB0491AB4
-u-boot=> fuse prog 6 2 0xD5B6A07B
-u-boot=> fuse prog 6 3 0xFD92DCE7
-u-boot=> fuse prog 7 0 0xC10DC87C
-u-boot=> fuse prog 7 1 0xD8BD04A9
-u-boot=> fuse prog 7 2 0x704E9FE4
-u-boot=> fuse prog 7 3 0x9B025359
-```
-## Verify the signature included in flash.bin
-The next step is to verify that the signatures included in flash.bin image is
-successfully processed without errors. HAB generates events when processing
-the commands if it encounters issues.
-
-The hab_status U-Boot command call the hab_report_event() and hab_status()
-HAB API functions to verify the processor security configuration and status.
-This command displays any events that were generated during the process.
-```console
-u-boot=> hab_status
-Secure boot disabled
-HAB Configuration: 0xf0, HAB State: 0x66
-```
-## Closing the device
-
-After the device successfully boots a signed image without generating any HAB
-events, it is safe to close the device. This is the last step in the HAB
-process, and is achieved by programming the SEC_CONFIG[1] fuse bit.
-
-Once the fuse is programmed, the chip does not load an image that has not been
-signed using the correct PKI tree.
-```console
-u-boot=> fuse prog 1 3 0x2000000
 ```
