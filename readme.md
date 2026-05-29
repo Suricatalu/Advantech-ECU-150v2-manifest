@@ -329,3 +329,115 @@ resize() {
 fi
 
 ```
+
+## RAUC OTA (A/B update)
+
+`meta-ecu150v2` includes built-in RAUC A/B OTA support. All RAUC-related variables are centralized in `conf/include/ecu150v2-rauc.inc`. A single toggle in `local.conf`, combined with a one-time key generation, is all that is needed to build and deploy OTA bundles.
+
+### 1. Enable / Disable RAUC
+
+Edit `bld-wayland/conf/local.conf`:
+
+```sh
+# Enable RAUC OTA (default: disabled)
+RAUC_ENABLED = "1"
+```
+
+Set to `"0"` to remove the `rauc` binary, `libubootenv-bin`, and all A/B boot policy configuration from the image, reverting to single-rootfs behavior.
+
+### 2. One-time: Generate signing keys (**never store inside the layer**)
+
+Keys are kept outside the layer at `${HOME}/.config/rauc-keys-ecu150v2/` to prevent accidental commits or leaks via `rsync`.
+
+```console
+foo@bar:~$ export KEYS=${HOME}/.config/rauc-keys-ecu150v2
+foo@bar:~$ mkdir -p ${KEYS} && chmod 700 ${KEYS}
+foo@bar:~$ cd ${KEYS} && bash <yocto>/sources/meta-rauc/scripts/openssl-ca.sh
+foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/ca.cert.pem                    ca.cert.pem
+foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/development-1.cert.pem         dev.cert.pem
+foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/private/development-1.key.pem  dev.key.pem
+foo@bar:~/.config/rauc-keys-ecu150v2$ chmod 600 *.key.pem
+foo@bar:~/.config/rauc-keys-ecu150v2$ cp ca.cert.pem <yocto>/sources/meta-ecu150v2/recipes-core/rauc/files/ca.cert.pem
+```
+
+> The bundle recipe defaults to `${HOME}/.config/rauc-keys-ecu150v2/` via `?=`. To use a different path (CI / HSM), override `RAUC_KEYS_DIR = "..."` in `local.conf`.
+
+### 3. Build the A/B image and bundle
+
+```console
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core      # includes rauc, libubootenv-bin, A/B config
+foo@bar:~/yocto/bld-wayland$ bitbake update-bundle       # produces the signed .raucb bundle
+```
+
+Build artifacts:
+- rootfs tarball: `tmp/deploy/images/ecu150v2/imx-image-core-ecu150v2.rootfs.tar.zst`
+- imx-boot binary: `tmp/deploy/images/ecu150v2/imx-boot-ecu150v2-sd.bin-flash_evk`
+- OTA bundle: `tmp/deploy/images/ecu150v2/update-bundle-ecu150v2.raucb`
+
+> [!IMPORTANT]
+> The default `*.wic.zst` produced by `imx-image-core` is a **single-rootfs** layout and is **not** compatible with RAUC A/B. To produce the required `p1=rootfs A` / `p2=rootfs B` / `p3=/data` layout on SD or eMMC, use `tools/flash/ecu150v2_flash_rauc_ab.sh` (located in the manifest repo) instead of `bmaptool`. The script consumes the rootfs tarball and `imx-boot` binary listed above.
+
+Verify bundle signature on the build host:
+
+```console
+foo@bar:~$ rauc info --keyring=${KEYS}/ca.cert.pem \
+    tmp/deploy/images/ecu150v2/update-bundle-ecu150v2.raucb
+```
+
+### 4. Flash the A/B layout to SD / eMMC
+
+> [!NOTE]
+> The examples below use an **SD card** as the boot medium. On ECU-150v2, the on-board eMMC
+> is always `mmcblk0` and the SD card slot is always `mmcblk1`. All `mmcblk1pN` references
+> below assume booting from SD. If flashing to eMMC instead, substitute `mmcblk1` with
+> `mmcblk0` throughout.
+
+`tools/flash/ecu150v2_flash_rauc_ab.sh` (in the manifest repo) creates p1 `rootfs.0` / p2 `rootfs.1` / p3 `data` (all ext4) and writes `imx-boot` at the 32 KiB offset. Slot A is populated with the rootfs tarball; slot B is left empty for the first OTA install.
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash_rauc_ab.sh \
+    --device /dev/sdX \
+    --deploy-dir bld-wayland/tmp/deploy/images/ecu150v2
+```
+
+> Replace `/dev/sdX` with the actual target device (`/dev/sdb` for SD, `/dev/mmcblk0` on the target for eMMC). Double-check the device — the script wipes the entire disk.
+>
+> To also populate slot B (useful for rollback bench-testing), append `--populate-b`.
+
+Boot the target from this medium once and confirm A/B is set up correctly:
+
+```console
+root@ecu150v2:~$ lsblk                             # expect mmcblk1p1/p2/p3
+root@ecu150v2:~$ findmnt /                         # expect /dev/mmcblk1p1
+root@ecu150v2:~$ mountpoint /data                  # expect: /data is a mountpoint
+root@ecu150v2:~$ rauc status                       # booted from rootfs.0, slot B empty
+```
+
+### 5. OTA install on target
+
+> [!NOTE]
+> `ecu150v2_flash_rauc_ab.sh` automatically copies the `.raucb` bundle to the `/data` partition
+> during flashing. If the script found a bundle at build time, it is already available at
+> `/data/update-bundle-ecu150v2.raucb` on the target — the `scp` step below can be skipped.
+
+```console
+foo@bar:~$ scp update-bundle-ecu150v2.raucb root@<target>:/tmp/
+```
+
+```console
+root@ecu150v2:~$ rauc status                       # confirm current slot (e.g. booted from rootfs.0 / A)
+root@ecu150v2:~$ rauc install /data/update-bundle-ecu150v2.raucb   # or /tmp/ if copied via scp
+root@ecu150v2:~$ fw_printenv BOOT_ORDER            # expect "B A"
+root@ecu150v2:~$ reboot
+```
+
+After reboot, the U-Boot console should print `RAUC: trying slot B (root=p2)`. Once Linux is up:
+
+```console
+root@ecu150v2:~$ findmnt /                         # expect /dev/mmcblk1p2
+root@ecu150v2:~$ rauc status                       # booted from rootfs.1
+```
+
+### 6. Identifying bundle versions
+
+The bundle recipe defaults to `RAUC_BUNDLE_VERSION = "${DATETIME}"`. After installation, `rauc status` displays the `bundle-version` per slot. To embed additional metadata (e.g. git hash, build ID), edit `meta-ecu150v2/recipes-core/bundles/update-bundle.bb`.
