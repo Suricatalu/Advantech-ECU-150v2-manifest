@@ -375,7 +375,7 @@ Build artifacts:
 - OTA bundle: `tmp/deploy/images/ecu150v2/update-bundle-ecu150v2.raucb`
 
 > [!IMPORTANT]
-> The default `*.wic.zst` produced by `imx-image-core` is a **single-rootfs** layout and is **not** compatible with RAUC A/B. To produce the required `p1=rootfs A` / `p2=rootfs B` / `p3=/data` layout on SD or eMMC, use `tools/flash/ecu150v2_flash_rauc_ab.sh` (located in the manifest repo) instead of `bmaptool`. The script consumes the rootfs tarball and `imx-boot` binary listed above.
+> The default `*.wic.zst` produced by `imx-image-core` is a **single-rootfs** layout and is **not** compatible with RAUC A/B. To produce the required `p1=rootfs A` / `p2=rootfs B` / `p3=/data` layout on SD or eMMC, use `tools/flash/ecu150v2_flash.sh` (located in the manifest repo) instead of `bmaptool`. The script consumes the rootfs tarball and `imx-boot` binary listed above.
 
 Verify bundle signature on the build host:
 
@@ -392,17 +392,23 @@ foo@bar:~$ rauc info --keyring=${KEYS}/ca.cert.pem \
 > below assume booting from SD. If flashing to eMMC instead, substitute `mmcblk1` with
 > `mmcblk0` throughout.
 
-`tools/flash/ecu150v2_flash_rauc_ab.sh` (in the manifest repo) creates p1 `rootfs.0` / p2 `rootfs.1` / p3 `data` (all ext4) and writes `imx-boot` at the 32 KiB offset. Slot A is populated with the rootfs tarball; slot B is left empty for the first OTA install.
+`tools/flash/ecu150v2_flash.sh` (in the manifest repo) creates p1 `rootfs.0` / p2 `rootfs.1` / p3 `data` (all ext4) and writes `imx-boot` at the 32 KiB offset. Slot A is populated with the rootfs tarball; slot B is left empty for the first OTA install.
 
 ```console
-foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash_rauc_ab.sh \
+sudo ./tools/flash/ecu150v2_flash.sh \
     --device /dev/sdX \
-    --deploy-dir bld-wayland/tmp/deploy/images/ecu150v2
+    --images bld-wayland/tmp/deploy/images/ecu150v2 \
+    --rauc \
+    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
 ```
 
 > Replace `/dev/sdX` with the actual target device (`/dev/sdb` for SD, `/dev/mmcblk0` on the target for eMMC). Double-check the device — the script wipes the entire disk.
 >
 > To also populate slot B (useful for rollback bench-testing), append `--populate-b`.
+
+> [!NOTE]
+> For other flash layout combinations (Ubuntu base, RAUC A/B, Ubuntu + Overlay, etc.),
+> see [`tools/flash/README.md`](tools/flash/README.md).
 
 Boot the target from this medium once and confirm A/B is set up correctly:
 
@@ -415,10 +421,7 @@ root@ecu150v2:~$ rauc status                       # booted from rootfs.0, slot 
 
 ### 5. OTA install on target
 
-> [!NOTE]
-> `ecu150v2_flash_rauc_ab.sh` automatically copies the `.raucb` bundle to the `/data` partition
-> during flashing. If the script found a bundle at build time, it is already available at
-> `/data/update-bundle-ecu150v2.raucb` on the target — the `scp` step below can be skipped.
+Copy the bundle to the target, then install it:
 
 ```console
 foo@bar:~$ scp update-bundle-ecu150v2.raucb root@<target>:/tmp/
@@ -426,7 +429,7 @@ foo@bar:~$ scp update-bundle-ecu150v2.raucb root@<target>:/tmp/
 
 ```console
 root@ecu150v2:~$ rauc status                       # confirm current slot (e.g. booted from rootfs.0 / A)
-root@ecu150v2:~$ rauc install /data/update-bundle-ecu150v2.raucb   # or /tmp/ if copied via scp
+root@ecu150v2:~$ rauc install /tmp/update-bundle-ecu150v2.raucb
 root@ecu150v2:~$ fw_printenv BOOT_ORDER            # expect "B A"
 root@ecu150v2:~$ reboot
 ```
@@ -441,3 +444,126 @@ root@ecu150v2:~$ rauc status                       # booted from rootfs.1
 ### 6. Identifying bundle versions
 
 The bundle recipe defaults to `RAUC_BUNDLE_VERSION = "${DATETIME}"`. After installation, `rauc status` displays the `bundle-version` per slot. To embed additional metadata (e.g. git hash, build ID), edit `meta-ecu150v2/recipes-core/bundles/update-bundle.bb`.
+
+
+## Immutable OS (overlayfs via initramfs)
+
+`meta-ecu150v2` includes optional OverlayFS-root support. When enabled, the real rootfs is mounted **read-only** as the overlay lower layer, and all writes defaultly land on a volatile tmpfs (wiped on reboot).
+
+It is implemented with a standard **initramfs + switch_root** flow: an `overlay-init` script (PID 1) mounts the read-only rootfs, stacks an overlayfs on top, then hands off to the real `/sbin/init`. The initramfs is bundled into the kernel `Image` (CPIO fromat), so U-Boot keeps using the same `booti ${loadaddr} - ${fdt_addr}` command.
+
+All overlay-related variables are centralized in `conf/include/ecu150v2-overlay.inc`. A single toggle in `local.conf` is all that is needed.
+
+### 1. Enable / Disable OverlayFS root
+
+Edit `bld-wayland/conf/local.conf`:
+
+```sh
+# Enable OverlayFS root via initramfs (default: disabled)
+OVERLAY_INITRAMFS_ROOT = "1"
+```
+
+This single switch does two things automatically:
+- Bundles the `initramfs-overlay-image` (which provides `/init`) into the kernel image (`INITRAMFS_IMAGE_BUNDLE = "1"`).
+- During image assembly, overwrites the rootfs `/boot/Image` with the initramfs-bundled kernel, so the kernel U-Boot loads from the rootfs actually contains the overlay `/init`.
+
+### 2. Build
+
+```console
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
+```
+
+> [!TIP]
+> If you only changed `OVERLAY_INITRAMFS_ROOT`, a clean rebuild of the kernel and image
+> ensures the bundled kernel is regenerated and copied into the rootfs:
+> ```console
+> foo@bar:~/yocto/bld-wayland$ bitbake virtual/kernel -c cleansstate
+> foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
+> ```
+
+After building with `OVERLAY_INITRAMFS_ROOT = "1"`, the kernel inside the rootfs
+is the initramfs-bundled version. Note that **no artifact paths change** —
+you still flash the same `imx-image-core-ecu150v2.rootfs.tar.zst`, but its
+`/boot/Image` is now the ~46 MB bundled kernel instead of the ~34 MB bare one:
+
+- Bundled kernel (intermediate, auto-installed into rootfs):
+  `tmp/deploy/images/ecu150v2/Image-initramfs-ecu150v2.bin`
+- The rootfs you actually flash (unchanged path):
+  `tmp/deploy/images/ecu150v2/imx-image-core-ecu150v2.rootfs.tar.zst`
+
+### 3. Verify the bundled kernel before flashing
+
+Confirm the rootfs `/boot/Image` is the larger, initramfs-bundled kernel (not the bare one):
+
+```console
+foo@bar:~/yocto/bld-wayland$ binwalk tmp/work/ecu150v2-poky-linux/imx-image-core/*/rootfs/boot/Image | grep -i cpio
+# expect to find a cpio archive containing 'init' and 'bin/busybox'
+```
+
+### 4. Flash and boot
+
+Flash the SD/eMMC with `tools/flash/ecu150v2_flash.sh`, pointing `--kernel` at the
+initramfs-bundled kernel — this is what makes the overlay `/init` take over at boot.
+The script writes `imx-boot` at the 32 KiB offset, creates the rootfs partition, and
+installs the kernel as `/boot/Image`:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images bld-wayland/tmp/deploy/images/ecu150v2 \
+    --kernel Image-initramfs-ecu150v2.bin \
+    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+The kernel runs `/init` (the overlay script) in initramfs instead of `/sbin/init` in real rootfs automatically,
+because the initramfs is embedded in the Image — the boot command itself is unchanged.
+By default, overlay writes land on a volatile tmpfs and are wiped on every reboot.
+
+> [!NOTE]
+> For other flash layout combinations (Ubuntu base, RAUC A/B, Ubuntu + Overlay, etc.),
+> see [`tools/flash/README.md`](tools/flash/README.md).
+
+### 5. Verify on the target
+
+After boot, confirm the overlay is active:
+
+```console
+root@ecu150v2:~$ mount | grep overlay
+# overlay on / type overlay (rw,...,lowerdir=...,upperdir=/run/rwdata/single/upper,...)
+
+root@ecu150v2:~$ mount | grep ' /ro '
+# /dev/mmcblk1pN on /ro type ext4 (ro,relatime)    <-- real rootfs, read-only
+
+root@ecu150v2:~$ df -h /rw
+# tmpfs mounted at /rw — this is where writes actually land
+```
+
+Confirm writes are volatile (the key property — they vanish on reboot):
+
+```console
+root@ecu150v2:~$ echo test > /overlay_write_test && reboot
+# after reboot:
+root@ecu150v2:~$ ls /overlay_write_test
+# ls: cannot access '/overlay_write_test': No such file or directory
+```
+
+The boot log should also show the overlay-init taking over:
+
+```text
+Run /init as init process
+overlay-init: lower (read-only rootfs): /dev/mmcblk1pN (ext4)
+overlay-init: writable slot: single
+overlay-init: switching to overlay root, real init: /sbin/init
+```
+
+### 6. Development backdoor
+
+To temporarily boot with a normal read-write rootfs (e.g. to modify the rootfs in place
+during development) **without** rebuilding, interrupt U-Boot and append `overlayroot=disabled`
+to the kernel command line. The `overlay-init` script will skip the overlay and mount the
+real rootfs read-write.
+
+> [!NOTE]
+> This is a development convenience only. Production images should always boot with the
+> overlay active so the rootfs stays immutable and power-loss-safe.
+
