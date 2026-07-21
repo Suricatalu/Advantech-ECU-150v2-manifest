@@ -445,6 +445,107 @@ root@ecu150v2:~$ rauc status                       # booted from rootfs.1
 
 The bundle recipe defaults to `RAUC_BUNDLE_VERSION = "${DATETIME}"`. After installation, `rauc status` displays the `bundle-version` per slot. To embed additional metadata (e.g. git hash, build ID), edit `meta-ecu150v2/recipes-core/bundles/update-bundle.bb`.
 
+---
+
+## RAUC Adaptive Update (delta OTA via HTTP streaming)
+
+Adaptive update is an optional extension on top of the standard A/B OTA. When enabled, RAUC compares the incoming bundle against the **currently installed slot** and only transfers the changed 4 KiB blocks over the network — significantly reducing bandwidth and install time for incremental updates.
+
+### Prerequisites
+
+- `RAUC_ENABLED = "1"` must already be set (adaptive is an extension of the base RAUC feature).
+- The HTTP server serving the bundle **must support Range Requests** (responds with HTTP `206`). Use nginx — it supports Range Requests out of the box and is the only tested server for this workflow.
+- RAUC ≥ 1.6 on the target (walnascar ships a compatible version).
+
+### 1. Enable adaptive update
+
+Edit `bld-wayland/conf/local.conf`:
+
+```sh
+# Enable RAUC OTA (required base)
+RAUC_ENABLED = "1"
+
+# Enable adaptive delta update (default: disabled)
+RAUC_ADAPTIVE_ENABLED = "1"
+```
+
+### 2. Build the adaptive bundle
+
+No changes to the build commands — the toggle is fully transparent:
+
+```console
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
+foo@bar:~/yocto/bld-wayland$ bitbake update-bundle
+```
+
+Verify the bundle contains the adaptive metadata (`${KEYS}` — see RAUC OTA step 2):
+
+```console
+foo@bar:~$ rauc info --keyring=${KEYS}/ca.cert.pem \
+    tmp/deploy/images/ecu150v2/update-bundle-ecu150v2.raucb
+```
+
+### 3. Serve the bundle over HTTP
+
+The bundle must be served by an HTTP server that supports Range Requests. The recommended approach is nginx:
+
+```console
+foo@bar:~$ sudo apt-get install -y nginx
+foo@bar:~$ sudo tee /etc/nginx/sites-available/rauc-bundle <<'EOF'
+server {
+    listen 8080;
+    root /path/to/bld-wayland/tmp/deploy/images/ecu150v2;
+    location / { sendfile off; autoindex on; }
+}
+EOF
+foo@bar:~$ sudo ln -sf /etc/nginx/sites-available/rauc-bundle \
+               /etc/nginx/sites-enabled/rauc-bundle
+foo@bar:~$ sudo rm -f /etc/nginx/sites-enabled/default
+foo@bar:~$ sudo nginx -t && sudo systemctl restart nginx
+```
+
+### 4. Install via streaming on target
+
+Replace `<server-ip>` with the build host's IP address. The `:8080` port must match the `listen` directive in the nginx config above.
+
+```console
+root@ecu150v2:~$ rauc status                       # confirm current slot before install
+root@ecu150v2:~$ rauc install http://<server-ip>:8080/update-bundle-ecu150v2.raucb
+...
+98% Copying image to rootfs.0
+99% Copying image to rootfs.0
+99% Copying image to rootfs.0 done.
+99% Updating slots done.
+100% Installing done.
+idle
+Installing `http://<server-ip>:8080/update-bundle-ecu150v2.raucb` succeeded
+root@ecu150v2:~$ fw_printenv BOOT_ORDER            # expect "B A" (or "A B" if installing to A)
+root@ecu150v2:~$ reboot
+```
+
+After reboot, confirm the new slot is active:
+
+```console
+root@ecu150v2:~$ rauc status                       # booted from the newly installed slot
+```
+
+### 5. Verify delta transfer (optional)
+
+On the build host, inspect the nginx access log while the install is in progress. A successful adaptive install produces many `206` lines — one per fetched block range — rather than a single large `200` transfer:
+
+```console
+foo@bar:~$ tail -f /var/log/nginx/access.log
+# expect lines like:  "GET /update-bundle-ecu150v2.raucb HTTP/1.1" 206 4096
+```
+
+On the target, run with `--debug` to see the reused / fetched block counts reported by RAUC:
+
+```console
+root@ecu150v2:~$ rauc --debug install http://<server-ip>:8080/update-bundle-ecu150v2.raucb \
+    2>&1 | tee /tmp/rauc-adaptive.log
+```
+
+---
 
 ## Immutable OS (overlayfs via initramfs)
 
