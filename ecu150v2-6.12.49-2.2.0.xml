@@ -12,6 +12,7 @@
   <remote name="ossystems"   fetch="https://github.com/OSSystems"/>
   <remote name="qt"          fetch="https://github.com/YoeDistro"/>
   <remote name="timesys"     fetch="https://github.com/TimesysGit"/>
+  <remote name="rauc"        fetch="https://github.com/rauc/"/>
 
   <remote name="imx"         fetch="https://github.com/nxp-imx"/>
   <remote name="imx-support" fetch="https://github.com/nxp-imx-support"/>
@@ -34,6 +35,10 @@
   <project name="meta-security" remote="yp" path="sources/meta-security" revision="1f7eeb8e84811fa79b98f236ade42dc52d44cfc6" upstream="walnascar"/>
   <project name="meta-timesys" remote="timesys" path="sources/meta-timesys" revision="3adeff0c300011fb7e4130dac5c54dc2e6e4fb2b" upstream="master" />
   <project name="meta-virtualization" remote="yp" path="sources/meta-virtualization" revision="38008d99d5bedc7d9769b9e95e3d6019a2df1698" upstream="walnascar" />
+
+  <!-- Required by meta-ecu-150v2: RAUC A/B OTA integration. -->
+  <project name="meta-rauc" remote="rauc" path="sources/meta-rauc" revision="a0b83842d131093e89fa4fefaaa1997f05afdf62" upstream="walnascar" />
+
   <project name="meta-ecu-150v2" remote="adv-tsu" path="sources/meta-ecu-150v2"/>
 
   <project name="meta-imx" remote="imx" path="sources/meta-imx" revision="refs/tags/rel_imx_6.12.49_2.2.0" upstream="walnascar-6.12.49-2.2.0">
@@ -42,5 +47,8 @@
   </project>
   <project name="meta-nxp-connectivity" remote="imx" path="sources/meta-nxp-connectivity" revision="refs/tags/rel_imx_6.12.49_2.2.0" upstream="imx_matter_2025_q3-post" />
   <project name="meta-nxp-demo-experience" remote="imx-support" path="sources/meta-nxp-demo-experience" revision="refs/tags/rel_imx_6.12.49_2.2.0" upstream="walnascar-6.12.49-2.2.0" />
+
+  <!-- Provides meta-secure-boot, a HARD prerequisite of meta-ecu-150v2-->
+  <project name="meta-nxp-security-reference-design" remote="imx-support" path="sources/meta-nxp-security-reference-design" revision="b36f644fe16e4e2ecea5b62e1e290ad2d2a4e23c" upstream="walnascar-6.12.49-2.2.0" />
 
 </manifest>

@@ -10,10 +10,14 @@ A single script covers every supported layout combination:
 - **Root filesystem**: normal read-write, or immutable OverlayFS root (by booting the
   initramfs-bundled kernel), optionally with a dedicated persistent overlay partition
   (`--overlay-data`).
+- **Secure boot**: HABv4 signed or plain, chosen explicitly with
+  `--secure-boot` / `--no-secure-boot` (see [Secure boot](#secure-boot-habv4)).
 
 There is **no separate boot partition**: `imx-boot` is written raw at the 32 KiB
 offset and partition 1 starts directly at the rootfs. U-Boot loads the kernel directly
-from the rootfs `/boot/Image`.
+from the rootfs `/boot/Image` — by default the rootfs decides which kernel boots, but
+under an explicit `--secure-boot` / `--no-secure-boot` the script actively enforces (and,
+if needed, swaps) the kernel's signedness too (see [Secure boot](#secure-boot-habv4)).
 
 > [!CAUTION]
 > The script **wipes the entire target disk**. Double-check `--device` before running.
@@ -38,11 +42,27 @@ the deploy directory, which is passed once via `--images`:
 ```
 bld-wayland/tmp/deploy/images/ecu150v2/
 ├── imx-image-core-ecu150v2.rootfs.tar.zst   # Yocto rootfs (always required)
-├── imx-boot                                  # bootloader (symlink, auto-detected)
-├── Image-ecu150v2.bin                        # plain kernel (auto-detected default)
-├── Image-initramfs-ecu150v2.bin              # initramfs-bundled kernel (overlay boot)
+├── imx-boot                                  # bootloader (symlink)
+├── imx-boot-ecu150v2-sd.bin-flash_evk        # bootloader (the real file)
+├── Image-ecu150v2.bin                        # plain kernel
+├── Image-initramfs-ecu150v2.bin              # initramfs-bundled kernel (overlay builds)
 └── imx8mp-evk-ecu150v2.dtb                   # device tree (auto-detected)
 ```
+
+A build with `SECURE_BOOT_ENABLED = "1"` adds **signed** artifacts alongside the
+unsigned ones, with deliberately similar names:
+
+```
+├── imx-boot                    -> signed-imx-boot-ecu150v2-sd.bin-flash_evk   # SIGNED
+├── signed-imx-boot-ecu150v2-sd.bin-flash_evk                                  # SIGNED
+├── imx-boot-ecu150v2-sd.bin-flash_evk                                         # unsigned
+├── signed-Image-ecu150v2.bin                                                  # SIGNED
+├── signed-Image-initramfs-ecu150v2.bin       # SIGNED (only on overlay builds)
+└── Image-ecu150v2.bin          -> Image--<version>-<stamp>.bin                # unsigned!
+```
+
+Note that `Image-ecu150v2.bin` stays **unsigned** — the signing recipe adds a new
+`signed-` file rather than replacing anything.
 
 The external **Ubuntu** rootfs tarball (e.g. `ubuntu-24.04-arm64-generic.rootfs.tar.zst`)
 is **not** produced by Yocto — build it separately (see the manifest README
@@ -58,13 +78,17 @@ is **not** produced by Yocto — build it separately (see the manifest README
 | `-i, --images <dir>` | Folder to resolve bare artifact names (the deploy dir). |
 | `--yocto <file>` | Yocto rootfs tarball. **Always required** (modules/firmware source). |
 | `--ubuntu <file>` | External Ubuntu rootfs tarball. Optional base. |
-| `-k, --kernel <file>` | Kernel installed as `/boot/Image`. Point at the initramfs kernel for overlay. |
+| `-S, --secure-boot` | Write the **signed** bootloader; `/boot/Image` is guaranteed **signed** too (auto-swapped from `--images` if the rootfs shipped an unsigned one). |
+| `-N, --no-secure-boot` | Write the **unsigned** bootloader — a plain card, even from a secure deploy dir; `/boot/Image` is guaranteed **unsigned** too (auto-swapped from `--images` if needed). |
+| `-k, --kernel <file>` | Override `/boot/Image`, bypassing the auto-swap above. **Not needed for a Yocto rootfs** — see below. |
 | `-D, --dtb <file>` | Device tree (auto: `imx8mp-evk-ecu150v2.dtb`). |
 | `-R, --rauc` | RAUC A/B layout (`p1` rootfsA, `p2` rootfsB, `p3` /data, `[p4]` overlay). |
 | `-O, --overlay-data` | Add a trailing ext4 partition for a **persistent** overlay upper/work. |
 | `--rootfs-size <sz>` | Size of each rootfs partition (default `6GiB`). |
 | `--data-size <sz>` | RAUC `/data` partition size (default `1GiB`). |
+| `-B, --imx-boot <file>` | Explicit bootloader path; overrides what the secure-boot mode would pick. |
 | `-y, --yes` | Skip the confirmation prompt. |
+| `--allow-unsigned` | Proceed even with a signed bootloader + unsigned kernel. That pair **does not boot** — debug only. See [Secure boot](#secure-boot-habv4). |
 | `-h, --help` | Full help, including the partition design. |
 
 Bare names (e.g. `Image-initramfs-ecu150v2.bin`) are resolved inside `--images`;
@@ -123,27 +147,26 @@ foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
     --kernel Image-initramfs-ecu150v2.bin
 ```
 
-`--kernel Image-initramfs-ecu150v2.bin` installs the initramfs kernel as `/boot/Image`.
-Overlay writes land on a **volatile tmpfs** and are wiped on every reboot.
+This is a case where `--kernel` **is** the right tool: an Ubuntu base has its own
+`/boot`, so the script cannot rely on the rootfs having the kernel you want. Overlay
+writes land on a **volatile tmpfs** and are wiped on every reboot.
 
 ---
 
 ## Scenario 3 — Yocto rootfs + Overlay
 
-Pure Yocto rootfs (no `--ubuntu`), initramfs kernel for overlay root.
+Pure Yocto rootfs (no `--ubuntu`), built with `OVERLAY_INITRAMFS_ROOT = "1"`.
 
 ```console
 foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
     --device /dev/sdX \
     --images "$IMAGES_DIR" \
-    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst \
-    --kernel Image-initramfs-ecu150v2.bin
+    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
 ```
 
 > [!TIP]
-> If you built with `OVERLAY_INITRAMFS_ROOT = "1"`, the rootfs tarball's `/boot/Image`
-> is **already** the initramfs-bundled kernel, so `--kernel` may be omitted. Passing it
-> explicitly works either way and is the safe choice.
+> **No `--kernel` here.** The overlay build already puts the initramfs-bundled kernel
+> into the rootfs `/boot/Image`, and the script keeps it. 
 
 ---
 
@@ -175,7 +198,7 @@ README "RAUC OTA (A/B update)" section.
 ## Scenario 5 — Yocto rootfs + RAUC + Overlay
 
 RAUC A/B **and** overlay root: A/B slots + `/data`, booting the initramfs kernel.
-Overlay writes land on a volatile tmpfs.
+Overlay writes land on a volatile tmpfs. Built with `OVERLAY_INITRAMFS_ROOT = "1"`.
 
 ```
 p1  ext4  rootfs A   (flashed)
@@ -188,24 +211,129 @@ foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
     --device /dev/sdX \
     --images "$IMAGES_DIR" \
     --rauc \
-    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst \
-    --kernel Image-initramfs-ecu150v2.bin
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+Again no `--kernel`: the bundled kernel is already in the rootfs, and that is also
+what the RAUC bundle carries into slot B.
+
+---
+
+## Scenario 6 — Yocto rootfs + Secure boot
+
+Plain single rootfs, no RAUC, no overlay — just add `--secure-boot`:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images "$IMAGES_DIR" \
+    --secure-boot \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+### Flashing a plain card from a secure deploy dir
+
+A secure build leaves **both** bootloaders in the deploy directory, and `imx-boot` is
+a symlink to the signed one. Without a flag you would silently get a secure card. Use
+`--no-secure-boot` to pick the unsigned bootloader by name — and it also makes sure the
+card ends up with an **unsigned** kernel, not just an unsigned bootloader:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX --images "$IMAGES_DIR" --no-secure-boot \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+---
+
+## Scenario 7 — Yocto rootfs + Overlay + Secure boot
+
+Same as Scenario 3, signed: overlay build, just add `--secure-boot`:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images "$IMAGES_DIR" \
+    --secure-boot \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+---
+
+## Scenario 8 — Yocto rootfs + RAUC + Secure boot
+
+A card flashed from a `SECURE_BOOT_ENABLED = "1"` build. Add **`--secure-boot`**:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images "$IMAGES_DIR" \
+    --rauc --secure-boot \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+---
+
+## Scenario 9 — Yocto rootfs + RAUC + Overlay + Secure boot
+
+Same as Scenario 5, signed: RAUC A/B + overlay, just add `--secure-boot`:
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images "$IMAGES_DIR" \
+    --rauc --secure-boot \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
 ```
 
 ---
 
 ## Scenario matrix
 
-| # | Scenario | `--ubuntu` | `--rauc` | `--kernel` (overlay) | Partitions |
-| --- | --- | :---: | :---: | :---: | --- |
-| 1 | Ubuntu | yes | | | `p1` |
-| 2 | Ubuntu + Overlay | yes | | yes | `p1` |
-| 3 | Yocto + Overlay | | | yes | `p1` |
-| 4 | Yocto + RAUC | | yes | | `p1 p2 p3` |
-| 5 | Yocto + RAUC + Overlay | | yes | yes | `p1 p2 p3` |
+Note how few flags there are: overlay needs none at flash time (the build decides it),
+and secure boot needs exactly one.
+
+| # | Scenario | `--ubuntu` | `--rauc` | `--kernel` | `--secure-boot` | Partitions |
+| --- | --- | :---: | :---: | :---: | :---: | --- |
+| 1 | Ubuntu | yes | | | | `p1` |
+| 2 | Ubuntu + Overlay | yes | | **yes** | | `p1` |
+| 3 | Yocto + Overlay | | | | | `p1` |
+| 4 | Yocto + RAUC | | yes | | | `p1 p2 p3` |
+| 5 | Yocto + RAUC + Overlay | | yes | | | `p1 p2 p3` |
+| 6 | Yocto + **Secure boot** | | | | **yes** | `p1` |
+| 7 | Yocto + Overlay + **Secure boot** | | | | **yes** | `p1` |
+| 8 | Yocto + RAUC + **Secure boot** | | yes | | **yes** | `p1 p2 p3` |
+| 9 | Yocto + RAUC + Overlay + **Secure boot** | | yes | | **yes** | `p1 p2 p3` |
+
+Add `--secure-boot` to **any** row to flash the signed bootloader; add `--overlay-data`
+to any row to make overlay writes persistent instead of tmpfs. The two are independent
+of each other and of RAUC — the build signs the initramfs-bundled kernel via
+`meta-ecu-150v2/recipes-secure-boot/linux/linux-imx-signature.bbappend`, so a signed
+RAUC bundle keeps secure boot working after an OTA to slot B.
 
 `--yocto <rootfs tarball>` is required in **all** scenarios (it provides the kernel
 modules / firmware, and is the rootfs base whenever `--ubuntu` is omitted).
+
+---
+
+## Secure boot (HABv4)
+
+Secure boot is an **explicit mode**, chosen with one flag:
+
+| Flag | Bootloader written | Kernel requirement |
+| --- | --- | --- |
+| `--secure-boot` | `signed-imx-boot-ecu150v2-sd.bin-flash_evk` | `/boot/Image` must end up **signed** — swapped in from `--images` if needed, **refused** if no signed counterpart exists |
+| `--no-secure-boot` | `imx-boot-ecu150v2-sd.bin-flash_evk` | `/boot/Image` must end up **unsigned** — swapped in from `--images` if needed, **refused** if no unsigned counterpart exists (no override) |
+| *(neither)* | whatever `imx-boot` points at | not enforced; whatever the rootfs ships is reported as-is |
+
+### When `--kernel` is still needed
+
+Only two cases: an **`--ubuntu` base** with no usable `/boot` (Scenario 2), or a
+deliberate one-off image. Everywhere else leave it out — it always wins over the
+auto-swap, and its own signedness is still checked against an explicit mode (an
+unsigned image with `--secure-boot`, or a **signed** image with `--no-secure-boot`, is
+refused up front, the latter with no override).
+
 
 ---
 
@@ -225,6 +353,15 @@ Remove the card, insert it into the ECU-150v2, and power on.
   ```console
   root@ecu150v2:~$ lsblk                       # expect mmcblk1p1/p2/p3
   root@ecu150v2:~$ rauc status                 # booted from rootfs.0, slot B empty
+  ```
+
+- **Secure boot scenarios** — confirm the HAB status. This is a **U-Boot** command, not
+  a Linux one: interrupt autoboot and check it at the `=>` prompt **before** Linux
+  starts (see [After flashing a signed card](#after-flashing-a-signed-card)):
+
+  ```console
+  => hab_status
+  No HAB Events Found!
   ```
 
 For overlay internals (development backdoor `overlayroot=disabled`) and the full RAUC

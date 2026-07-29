@@ -35,13 +35,83 @@
 #   --dtb          DTB file      -> /boot/<name> + /boot/imx8mp-evk.dtb
 #   --imx-boot     imx-boot      -> written raw at 32 KiB
 #
-# Kernel selection:
-#   --kernel <file>   explicit path or bare name (always wins). Point this at
-#                     Image-initramfs-ecu150v2.bin to use the overlay-capable
-#                     initramfs kernel; the script copies it verbatim and does
-#                     NOT care whether the image embeds a cpio.
-#   otherwise         auto-detect Image-ecu150v2.bin in --images
-#   final fallback    whatever /boot/Image the rootfs tarball already ships
+# Secure boot (HABv4) — an explicit mode, not a guess:
+#
+#   --secure-boot      flash the SIGNED bootloader; /boot/Image is guaranteed
+#                      SIGNED too (swapped in from --images if the rootfs
+#                      shipped an unsigned kernel)
+#   --no-secure-boot   flash the UNSIGNED bootloader (plain/debug card);
+#                      /boot/Image is guaranteed UNSIGNED too (swapped in from
+#                      --images if the rootfs shipped a signed kernel)
+#   (neither)          auto: infer the mode from whichever imx-boot resolves,
+#                      and only report -- neither artifact's signedness is
+#                      enforced or swapped in this mode
+#
+#   The mode matters because a build with SECURE_BOOT_ENABLED = "1" deploys BOTH
+#   variants side by side under confusingly similar names:
+#
+#     imx-boot                          -> symlink to signed-imx-boot-*  SIGNED
+#     signed-imx-boot-ecu150v2-sd.bin-flash_evk                          SIGNED
+#     imx-boot-ecu150v2-sd.bin-flash_evk                                 unsigned
+#
+#   Without a mode switch the bare "imx-boot" symlink silently decides for you,
+#   and there is no obvious way to flash a plain card from a secure deploy dir.
+#   With --no-secure-boot the unsigned file is selected by name instead.
+#
+#   The bootloader is chosen by name, because it is written raw at 32 KiB and is
+#   not part of the rootfs. The kernel starts out as whatever the build already
+#   installed into the rootfs (/boot/Image, see
+#   meta-ecu-150v2/recipes-core/images/imx-image-core.bbappend, which covers all
+#   four SECURE_BOOT_ENABLED x OVERLAY_INITRAMFS_ROOT combinations) -- but under
+#   an EXPLICIT mode it no longer just rides along: it is checked by content
+#   after extraction and swapped for its signed/unsigned counterpart from
+#   --images when it does not match the requested mode (variant-preserving, see
+#   counterpart_kernel_name).
+#
+#   Why a signed-bootloader + unsigned-kernel mismatch is fatal and not merely
+#   insecure: a signed bootloader was built with CONFIG_IMX_HAB=y, and NXP's
+#   booti then calls authenticate_image() on every boot; imx_hab_authenticate_image()
+#   verifies even on OPEN devices (it merely prints "hab fuse not enabled" first).
+#   So a signed bootloader paired with an unsigned kernel does not boot at all
+#   (override: --allow-unsigned). The reverse pairing (unsigned bootloader +
+#   signed kernel) still boots -- HAB is simply inert -- but --no-secure-boot
+#   refuses it anyway (no override) because a plain card must not carry any
+#   signed artifact at all.
+#
+# Kernel selection — the rootfs is the starting point, the mode is authoritative:
+#   auto (default)    DO NOT touch /boot/Image. Whatever the rootfs tarball ships
+#                     is probed (content-based, see is_signed_kernel) and only
+#                     reported -- auto makes no promise either way.
+#   --secure-boot     /boot/Image MUST end up signed. If the rootfs kernel is
+#                     already signed it is left alone; if not, it is SWAPPED for
+#                     the signed counterpart (see counterpart_kernel_name -- the
+#                     plain/initramfs variant is preserved) resolved from
+#                     --images. No signed counterpart found -> refuse (override:
+#                     --allow-unsigned).
+#   --no-secure-boot  /boot/Image MUST end up unsigned -- a plain card must not
+#                     carry a signed kernel at all. A signed rootfs kernel is
+#                     SWAPPED for its unsigned counterpart from --images (variant
+#                     preserved). No unsigned counterpart found -> refuse.
+#   --kernel <file>   explicit override, always wins over the rootfs AND over the
+#                     auto-swap above; its signedness is still validated against
+#                     an explicit --secure-boot/--no-secure-boot (refuses on a
+#                     mismatch; override: --allow-unsigned for the secure-boot
+#                     case only -- --no-secure-boot with a signed --kernel is
+#                     always a hard error, no override).
+#   fallback          if the extracted rootfs has no /boot/Image at all, one is
+#                     auto-detected from --images, mode-aware (signed variants in
+#                     secure mode) and preferring the initramfs-bundled variant
+#                     when --overlay-data was requested.
+#
+#   The swap always preserves the plain vs. initramfs-bundled variant of the
+#   kernel already on the rootfs (matched by content against --images, see
+#   identify_rootfs_kernel + counterpart_kernel_name), never just the generic
+#   mode-aware ordering. Earlier versions auto-detected signed-Image-ecu150v2.bin
+#   and copied it over /boot/Image unconditionally regardless of variant: on an
+#   overlay + secure build that replaced the signed BUNDLED kernel with the
+#   signed PLAIN one -- the board still booted and hab_status stayed clean, but
+#   overlay was silently gone. The variant-preserving swap fixes that failure
+#   mode while still guaranteeing the signedness the active mode requires.
 #
 # DTB selection priority:
 #   1. --dtb <file>   explicit path or bare name inside --images
@@ -58,22 +128,26 @@
 # setenv is needed with the current bootloader.
 #
 # Examples:
-#   # DEFAULT: non-RAUC plain kernel, single rootfs (no overlay):
-#   sudo ./ecu150v2_flash_ubuntu_overlay.sh -d /dev/sdX -i ~/deploy \
+#   # DEFAULT: non-RAUC, single rootfs, kernel taken from the rootfs as-is:
+#   sudo ./ecu150v2_flash.sh -d /dev/sdX -i ~/deploy \
 #       --yocto imx-image-core-ecu150v2.rootfs.tar.zst
 #
-#   # non-RAUC overlay: initramfs kernel + trailing rwdata partition (p2):
-#   sudo ./ecu150v2_flash_ubuntu_overlay.sh -d /dev/sdX -i ~/deploy --overlay-data \
-#       --kernel Image-initramfs-ecu150v2.bin \
-#       --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
+#   # SECURE BOOT: signed bootloader; the signed kernel already in the rootfs is
+#   # verified before anything is written:
+#   sudo ./ecu150v2_flash.sh -d /dev/sdX -i ~/deploy --secure-boot \
+#       --yocto imx-image-core-ecu150v2.rootfs.tar.zst
 #
-#   # RAUC A/B + /data, plus overlay rwdata on p4:
-#   sudo ./ecu150v2_flash_ubuntu_overlay.sh -d /dev/sdX -i ~/deploy --rauc --overlay-data \
-#       --kernel Image-initramfs-ecu150v2.bin \
-#       --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
+#   # Same deploy dir, but deliberately produce a PLAIN card (unsigned imx-boot):
+#   sudo ./ecu150v2_flash.sh -d /dev/sdX -i ~/deploy --no-secure-boot \
+#       --yocto imx-image-core-ecu150v2.rootfs.tar.zst
 #
-#   # External Ubuntu base + Yocto modules/firmware (plain kernel):
-#   sudo ./ecu150v2_flash_ubuntu_overlay.sh -d /dev/sdX -i ~/deploy \
+#   # Secure boot + overlay + RAUC A/B: no --kernel needed, the rootfs already
+#   # carries signed-Image-initramfs-ecu150v2.bin:
+#   sudo ./ecu150v2_flash.sh -d /dev/sdX -i ~/deploy --secure-boot --rauc \
+#       --overlay-data --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+#
+#   # External Ubuntu base + Yocto modules/firmware:
+#   sudo ./ecu150v2_flash.sh -d /dev/sdX -i ~/deploy \
 #       --ubuntu ubuntu-24.04-arm64-generic.rootfs.tar.zst \
 #       --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
 
@@ -94,6 +168,12 @@ OVERLAY_DATA=0             # 1 = add an ext4 partition for overlay upper/work (l
 ROOTFS_SIZE="6GiB"         # size of EACH rootfs partition (non-RAUC p1; RAUC each A/B slot)
 DATA_SIZE="1GiB"           # RAUC /data partition size (p3)
 RWDATA_LABEL="rwdata"      # filesystem label of the overlay data partition
+SECURE_BOOT_MODE="auto"    # auto | on (--secure-boot) | off (--no-secure-boot)
+
+# Deploy-dir names of the two bootloader variants. meta-secure-boot prefixes the
+# signed one and leaves the original in place, so both exist after a secure build.
+IMX_BOOT_SIGNED="signed-imx-boot-ecu150v2-sd.bin-flash_evk"
+IMX_BOOT_PLAIN="imx-boot-ecu150v2-sd.bin-flash_evk"
 
 # ----------------------------------------------------------------------------
 # Small helpers (same palette/style as adv_chroot.sh)
@@ -106,7 +186,7 @@ die()  { err "$*"; exit 1; }
 
 usage() {
     cat >&2 <<'EOF'
-Usage: ecu150v2_flash_ubuntu_overlay.sh -d <disk> --yocto <tarball> [options]
+Usage: ecu150v2_flash.sh -d <disk> --yocto <tarball> [options]
 
 Target: Advantech ECU-150v2 (NXP i.MX8MP / imx8mp). Default non-RAUC; --rauc for A/B.
 
@@ -114,13 +194,29 @@ Required:
   -d, --disk <dev>        target block device (e.g. /dev/sdb)
   --yocto, --bsp <file>   Yocto rootfs tarball (modules/firmware; base if no --ubuntu)
 
+Secure boot (HABv4):
+  -S, --secure-boot       flash the SIGNED bootloader; /boot/Image is guaranteed
+                          SIGNED too (auto-swapped from --images if needed,
+                          refuses if no signed counterpart exists)
+  -N, --no-secure-boot    flash the UNSIGNED bootloader -- a plain/debug card,
+                          even from a deploy dir that also contains signed files.
+                          /boot/Image is guaranteed UNSIGNED too (auto-swapped
+                          from --images if needed, refuses if it cannot be)
+  (neither)               auto: infer from whichever imx-boot resolves; neither
+                          artifact's signedness is enforced in this mode
+
 Optional:
   -i, --images <dir>      folder to resolve bare artifact names (default: .)
   --ubuntu <file>         external Ubuntu rootfs tarball (base; Yocto overlaid on top)
-  -k, --kernel <file>     kernel Image -> /boot/Image (auto: Image-ecu150v2.bin;
-                          point at Image-initramfs-ecu150v2.bin for overlay boot)
+  -k, --kernel <file>     override /boot/Image. NOT needed for a normal Yocto
+                          rootfs: under --secure-boot/--no-secure-boot the
+                          right kernel is auto-swapped in from --images when
+                          the rootfs shipped the wrong signedness; --kernel is
+                          only for an --ubuntu base with no usable /boot, or to
+                          force a specific image (its signedness is still
+                          checked against an explicit mode).
   -D, --dtb <file>        DTB -> /boot (auto: imx8mp-evk-ecu150v2.dtb)
-  -B, --imx-boot <file>   imx-boot bootloader (default: imx-boot)
+  -B, --imx-boot <file>   explicit bootloader path; overrides the mode's choice
   -R, --rauc              RAUC A/B layout (p1 rootfsA, p2 rootfsB, p3 /data, [p4 overlay])
   -O, --overlay-data      add an ext4 partition for overlay upper/work (last partition)
   --rootfs-size <sz>      size of each rootfs partition (default: 6GiB)
@@ -128,7 +224,31 @@ Optional:
   --offset <kb>           imx-boot raw offset in KiB (default: 32)
   --part-start <sz>       first partition start (default: 8MiB)
   -y, --yes               do not prompt for confirmation
+  --allow-unsigned        proceed even when a SIGNED bootloader is paired with an
+                          unsigned kernel. That combination does NOT boot (booti
+                          authenticates the kernel whenever CONFIG_IMX_HAB=y, open
+                          devices included) -- debug use only.
   -h, --help              show this help
+
+How the secure-boot mode is applied:
+  The bootloader is chosen by name, because it is written raw at 32 KiB and is
+  not part of the rootfs:
+      --secure-boot     -> signed-imx-boot-ecu150v2-sd.bin-flash_evk
+      --no-secure-boot  -> imx-boot-ecu150v2-sd.bin-flash_evk (refuses a signed one)
+      auto              -> the "imx-boot" symlink, whatever the build pointed it at
+  The kernel (/boot/Image, probed by content -- arm64 image_size offset -> IVT
+  header) is actively enforced under an EXPLICIT mode:
+      --secure-boot     -> must end up signed; an unsigned rootfs kernel is
+                           swapped for its signed counterpart from --images
+                           (same plain/initramfs variant), or the flash refuses
+                           (override: --allow-unsigned).
+      --no-secure-boot  -> must end up unsigned; a signed rootfs kernel is
+                           swapped for its unsigned counterpart from --images
+                           (same variant), or the flash refuses (no override).
+      auto              -> not enforced; whatever the rootfs ships is reported
+                           as-is, matching whatever --imx-boot resolved to.
+  Either way the check/swap runs BEFORE the bootloader is written, so a refusal
+  leaves a card with no bootloader instead of a subtly broken one.
 
 Partition design (NO separate boot partition; imx-boot is raw at 32 KiB,
 p1 starts directly at the rootfs):
@@ -180,6 +300,120 @@ resolve_artifact() {
     if [[ -e "$f" ]]; then readlink -f "$f"; return; fi
     if [[ -e "$IMAGES/$f" ]]; then readlink -f "$IMAGES/$f"; return; fi
     printf '%s' "$f"
+}
+
+# ----------------------------------------------------------------------------
+# Secure boot (HABv4) detection
+# ----------------------------------------------------------------------------
+# A HABv4-signed arm64 kernel is laid out as
+#     [ Image padded to the arm64 header's image_size ][ 32-byte IVT ][ CSF ]
+# so the IVT header (tag 0xD1 + big-endian length 0x0020) sits exactly at the
+# image_size offset. That makes this a content-based test, not a name guess.
+# (Same offset linux-imx-signature.bb uses: od -An -j 16 -N 4 -i.)
+is_signed_kernel() {
+    local f="$1" pad size hdr
+    [[ -f "$f" ]] || return 1
+    # arm64 header: image_size is a little-endian u64 at offset 0x10.
+    pad="$(od -An -t u4 -j 16 -N 4 -- "$f" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$pad" =~ ^[1-9][0-9]*$ ]] || return 1
+    size="$(stat -Lc%s -- "$f" 2>/dev/null)" || return 1
+    (( pad + 32 <= size )) || return 1
+    hdr="$(od -An -t x1 -j "$pad" -N 3 -- "$f" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$hdr" == "d10020" ]]
+}
+
+# imx-boot has no cheap content test: its CSF is inserted into pre-reserved
+# padding, so the signed file is byte-for-byte the same SIZE as the unsigned
+# one. Fall back to the deploy name that meta-nxp-security-reference-design
+# gives it (signed-imx-boot-*), which resolve_artifact() reaches through the
+# imx-boot symlink. Authoritative check: works/habv4parser/habtool.py --check
+looks_signed_bootloader() {
+    [[ "${1##*/}" == signed-* ]]
+}
+
+# Pick the bootloader for the requested mode. --imx-boot always wins; without it
+# "on"/"off" select the variant by name and "auto" keeps the historical default
+# of following the bare imx-boot symlink.
+resolve_bootloader() {
+    local want="$1" p
+    case "$want" in
+        on)
+            p="$(resolve_artifact "$IMX_BOOT_SIGNED")"
+            [[ -f "$p" ]] || die "--secure-boot: $IMX_BOOT_SIGNED not found in $IMAGES
+  Build with SECURE_BOOT_ENABLED = \"1\" first, or pass --imx-boot <path>."
+            ;;
+        off)
+            p="$(resolve_artifact "$IMX_BOOT_PLAIN")"
+            [[ -f "$p" ]] || die "--no-secure-boot: $IMX_BOOT_PLAIN not found in $IMAGES
+  Pass --imx-boot <path> to name the unsigned bootloader explicitly."
+            # meta-secure-boot signs imx-boot in place inside pre-reserved padding,
+            # so the signed file is the same SIZE as the unsigned one and there is
+            # no content test to fall back on -- the name is all we have.
+            if [[ "$(readlink -f "$p")" == *"/signed-"* ]]; then
+                die "--no-secure-boot: $IMX_BOOT_PLAIN resolves to a signed file
+  ($(readlink -f "$p")) -- cannot produce a plain card from this deploy dir."
+            fi
+            ;;
+        *)
+            p="$(resolve_artifact "$IMX_BOOT")"
+            ;;
+    esac
+    printf '%s' "$p"
+}
+
+# Name the kernel sitting in the extracted rootfs by comparing it against the
+# deploy-dir candidates. Size is checked first so cmp only reads a 40+ MB file
+# when it can actually match. Echoes the artifact name, or nothing.
+identify_rootfs_kernel() {
+    local k="$1" ksize cand cpath
+    ksize="$(stat -Lc%s -- "$k" 2>/dev/null)" || return 0
+    for cand in "signed-Image-initramfs-ecu150v2.bin" "signed-Image-ecu150v2.bin" \
+                "Image-initramfs-ecu150v2.bin" "Image-ecu150v2.bin"; do
+        cpath="$(resolve_artifact "$cand")"
+        [[ -f "$cpath" ]] || continue
+        [[ "$(stat -Lc%s -- "$cpath" 2>/dev/null)" == "$ksize" ]] || continue
+        if cmp -s -- "$k" "$cpath"; then printf '%s' "$cand"; return 0; fi
+    done
+    return 0
+}
+
+# Given a deploy-artifact kernel name, return the name of its signed/unsigned
+# counterpart, preserving the plain vs. initramfs-bundled variant. Used to swap
+# the rootfs kernel to match an explicit --secure-boot/--no-secure-boot mode
+# WITHOUT ever changing plain<->initramfs (that silent downgrade is exactly the
+# "Earlier versions" bug described above populate_rootfs()).
+counterpart_kernel_name() {
+    local n="$1"
+    if [[ "$n" == signed-* ]]; then
+        printf '%s' "${n#signed-}"
+    else
+        printf '%s' "signed-${n}"
+    fi
+}
+
+# Auto-detect a kernel from --images. Only used when the extracted rootfs has no
+# /boot/Image at all (e.g. an --ubuntu base without a usable /boot), or as a
+# fallback when the current kernel's exact variant could not be identified by
+# content. Order is mode-aware, and --overlay-data is taken as a request for
+# the bundled variant.
+autodetect_kernel() {
+    local order=() n p
+    if [[ $OVERLAY_DATA -eq 1 ]]; then
+        order=(signed-Image-initramfs-ecu150v2.bin Image-initramfs-ecu150v2.bin
+               signed-Image-ecu150v2.bin Image-ecu150v2.bin)
+    else
+        order=(signed-Image-ecu150v2.bin Image-ecu150v2.bin
+               signed-Image-initramfs-ecu150v2.bin Image-initramfs-ecu150v2.bin)
+    fi
+    # In an explicit mode, only consider the matching variant: a signed kernel is
+    # useless without a HAB bootloader, and an unsigned one cannot boot with one.
+    for n in "${order[@]}"; do
+        if [[ "$SECURE_BOOT_MODE" == "on"  && "$n" != signed-* ]]; then continue; fi
+        if [[ "$SECURE_BOOT_MODE" == "off" && "$n" == signed-* ]]; then continue; fi
+        p="$(resolve_artifact "$n")"
+        if [[ -f "$p" ]]; then printf '%s' "$p"; return 0; fi
+    done
+    return 0
 }
 
 # Convert a size string (e.g. 8MiB, 6GiB, 512M, 2G, or a bare number = MiB)
@@ -412,6 +646,120 @@ populate_rootfs() {
     fi
 }
 
+# Inspect the kernel that will actually boot and hold it against the secure-boot
+# mode. Runs on the mounted rootfs -- after every substitution, so it sees the
+# final state rather than guessing from filenames in the deploy dir. Called
+# BEFORE write_bootloader(), so a refusal leaves a card with no bootloader (and
+# hence obviously non-bootable) instead of a subtly broken one.
+verify_rootfs_kernel() {
+    # Two statements on purpose: within one `local` the earlier name is not yet
+    # assigned, so "local mnt=$1 k=$mnt/..." trips set -u.
+    local mnt="$1"
+    local k="$mnt/boot/Image"
+
+    # No kernel at all: only expected for an --ubuntu base whose /boot is unusable.
+    if [[ ! -f "$k" ]]; then
+        local fallback
+        fallback="$(autodetect_kernel)"
+        if [[ -z "$fallback" ]]; then
+            die "the rootfs has no /boot/Image and no usable kernel was found in $IMAGES
+  Pass --kernel <image> explicitly."
+        fi
+        warn "the rootfs has no /boot/Image; installing ${fallback##*/} from --images"
+        install -d "$mnt/boot"
+        cp -L "$fallback" "$k"
+    fi
+
+    SB_KERNEL=0
+    if is_signed_kernel "$k"; then SB_KERNEL=1; fi
+    ROOTFS_KERNEL_NAME="$(identify_rootfs_kernel "$k")"
+
+    # Under an EXPLICIT mode, /boot/Image's signedness is not just reported, it
+    # is enforced: swap in the matching counterpart from --images when the
+    # rootfs shipped the wrong one. --kernel overrides skip this entirely --
+    # main() already validated (and, for --no-secure-boot, hard-refused) that
+    # explicit choice, so it is never touched here.
+    if [[ -z "$KERNEL_IMAGE" ]]; then
+        if [[ "$SECURE_BOOT_MODE" == "off" && $SB_KERNEL -eq 1 ]]; then
+            local plain=""
+            if [[ -n "$ROOTFS_KERNEL_NAME" ]]; then
+                plain="$(resolve_artifact "$(counterpart_kernel_name "$ROOTFS_KERNEL_NAME")")"
+                [[ -f "$plain" ]] || plain=""
+            fi
+            [[ -n "$plain" ]] || plain="$(autodetect_kernel)"
+            if [[ -z "$plain" ]]; then
+                die "--no-secure-boot: /boot/Image from the rootfs is SIGNED (${ROOTFS_KERNEL_NAME:-unidentified}) and no unsigned counterpart was found in $IMAGES.
+  A plain card must not carry any signed kernel. Add Image-ecu150v2.bin /
+  Image-initramfs-ecu150v2.bin to --images, or pass --kernel <unsigned image>."
+            fi
+            warn "--no-secure-boot: /boot/Image is SIGNED (${ROOTFS_KERNEL_NAME:-unidentified}); swapping in ${plain##*/}"
+            install -d "$mnt/boot"
+            cp -L "$plain" "$k"
+            SB_KERNEL=0
+            ROOTFS_KERNEL_NAME="$(identify_rootfs_kernel "$k")"
+        elif [[ "$SECURE_BOOT_MODE" == "on" && $SB_KERNEL -eq 0 ]]; then
+            local signed=""
+            if [[ -n "$ROOTFS_KERNEL_NAME" ]]; then
+                signed="$(resolve_artifact "$(counterpart_kernel_name "$ROOTFS_KERNEL_NAME")")"
+                [[ -f "$signed" ]] || signed=""
+            fi
+            [[ -n "$signed" ]] || signed="$(autodetect_kernel)"
+            if [[ -n "$signed" ]]; then
+                warn "--secure-boot: /boot/Image is unsigned (${ROOTFS_KERNEL_NAME:-unidentified}); swapping in ${signed##*/}"
+                install -d "$mnt/boot"
+                cp -L "$signed" "$k"
+                SB_KERNEL=1
+                ROOTFS_KERNEL_NAME="$(identify_rootfs_kernel "$k")"
+            fi
+            # No signed counterpart found: fall through, the fatal check below
+            # refuses (or proceeds with --allow-unsigned).
+        fi
+    fi
+
+    log "/boot/Image: $([[ $SB_KERNEL -eq 1 ]] && echo SIGNED || echo unsigned)$([[ -n "$ROOTFS_KERNEL_NAME" ]] && echo ", matches ${ROOTFS_KERNEL_NAME}")"
+    if [[ "$ROOTFS_KERNEL_NAME" == *initramfs* ]]; then
+        log "  initramfs-bundled -> overlay/immutable root is available"
+    fi
+
+    # The fatal pairing: a signed bootloader means CONFIG_IMX_HAB=y, and NXP's
+    # booti then calls authenticate_image() on every boot (cmd/booti.c). Even on
+    # an OPEN device imx_hab_authenticate_image() merely prints "hab fuse not
+    # enabled" and verifies anyway, so an unsigned kernel is fatal here.
+    if [[ $SB_BOOTLOADER -eq 1 && $SB_KERNEL -eq 0 ]]; then
+        err "secure boot mismatch: bootloader is SIGNED but /boot/Image is NOT."
+        err "  bootloader : ${IMX_BOOT##*/}"
+        if [[ -n "$KERNEL_IMAGE" ]]; then
+            err "  kernel     : ${KERNEL_IMAGE##*/}  (installed via --kernel)"
+        else
+            err "  kernel     : /boot/Image from the rootfs tarball ${BSP##*/}"
+        fi
+        err "This pair does NOT boot -- booti authenticates the kernel on every boot,"
+        err "OPEN devices included."
+        if [[ -n "$KERNEL_IMAGE" ]]; then
+            err "Fix: drop --kernel so the rootfs kernel is kept, or point it at a signed-* image."
+        else
+            err "No signed counterpart was found in $IMAGES to auto-swap in either, so the"
+            err "BUILD is what needs fixing:"
+            err "  * SECURE_BOOT_ENABLED = \"1\" must be set in bld-wayland/conf/local.conf, and"
+            err "  * meta-secure-boot must be in BBLAYERS (sources/meta-ecu-150v2/scripts/ecu150v2-setup.sh)"
+            err "  so imx-image-core.bbappend can install signed-Image*.bin into /boot/Image."
+            err "Or flash a plain card instead: --no-secure-boot."
+        fi
+        [[ $ALLOW_UNSIGNED -eq 1 ]] || die "refusing to flash an unbootable card (override: --allow-unsigned)"
+        warn "--allow-unsigned given: proceeding; expect 'Authenticate Image Fail' on boot"
+    fi
+
+    # Only reachable in "auto" mode: an explicit --no-secure-boot already forced
+    # SB_KERNEL back to 0 above (swap-or-die), so this combination cannot occur
+    # there any more.
+    if [[ $SB_BOOTLOADER -eq 0 && $SB_KERNEL -eq 1 ]]; then
+        warn "/boot/Image is signed but ${IMX_BOOT##*/} does not look signed."
+        warn "  This still boots, but you are NOT getting secure boot."
+        warn "  Use --secure-boot to write $IMX_BOOT_SIGNED instead, or --no-secure-boot"
+        warn "  to also swap the kernel for an unsigned one."
+    fi
+}
+
 write_bootloader() {
     local disk="$1"
     log "writing imx-boot to ${disk} @ ${IMX_BOOT_OFFSET_KB} KiB (${IMX_BOOT##*/})"
@@ -429,8 +777,13 @@ IMAGES="."
 UBUNTU=""
 BSP=""
 IMX_BOOT="imx-boot"
+IMX_BOOT_EXPLICIT=0        # 1 = --imx-boot was given, so do not let the mode pick
 ASSUME_YES=0
+ALLOW_UNSIGNED=0           # 1 = do not refuse a signed-bootloader + unsigned-kernel mix
 KVER=""
+SB_BOOTLOADER=0            # 1 = the imx-boot being written looks HABv4-signed
+SB_KERNEL=0                # 1 = the /boot/Image on the card is HABv4-signed
+ROOTFS_KERNEL_NAME=""      # deploy artifact the rootfs /boot/Image matched, if any
 
 main() {
     ORIG_ARGS=("$@")
@@ -441,16 +794,28 @@ main() {
             -i|--images)        IMAGES="${2:-}"; shift 2 ;;
             -u|--ubuntu)        UBUNTU="${2:-}"; shift 2 ;;
             -b|--bsp|--yocto)   BSP="${2:-}"; shift 2 ;;
-            -B|--imx-boot)      IMX_BOOT="${2:-}"; shift 2 ;;
+            -B|--imx-boot)      IMX_BOOT="${2:-}"; IMX_BOOT_EXPLICIT=1; shift 2 ;;
             -k|--kernel|--image) KERNEL_IMAGE="${2:-}"; shift 2 ;;
             -D|--dtb)           DTB_FILE="${2:-}"; shift 2 ;;
             -R|--rauc)          RAUC=1; shift ;;
             -O|--overlay-data)  OVERLAY_DATA=1; shift ;;
+            -S|--secure-boot)    SECURE_BOOT_MODE="on"; shift ;;
+            -N|--no-secure-boot) SECURE_BOOT_MODE="off"; shift ;;
+            --secure-boot=*)
+                SECURE_BOOT_MODE="${1#*=}"
+                case "$SECURE_BOOT_MODE" in
+                    on|off|auto) ;;
+                    yes|true|1)  SECURE_BOOT_MODE="on" ;;
+                    no|false|0)  SECURE_BOOT_MODE="off" ;;
+                    *) die "--secure-boot=: expected on|off|auto, got '${1#*=}'" ;;
+                esac
+                shift ;;
             --rootfs-size)      ROOTFS_SIZE="${2:-}"; shift 2 ;;
             --data-size)        DATA_SIZE="${2:-}"; shift 2 ;;
             --offset)           IMX_BOOT_OFFSET_KB="${2:-}"; shift 2 ;;
             --part-start)       PART_START="${2:-}"; shift 2 ;;
             -y|--yes)           ASSUME_YES=1; shift ;;
+            --allow-unsigned)   ALLOW_UNSIGNED=1; shift ;;
             -h|--help)          usage 0 ;;
             *) err "unknown option: $1"; usage 1 ;;
         esac
@@ -464,10 +829,41 @@ main() {
 
     [[ -n "$BSP"    ]] || die "missing --yocto/--bsp <Yocto rootfs tarball>"
     BSP="$(resolve_artifact "$BSP")"
-    IMX_BOOT="$(resolve_artifact "$IMX_BOOT")"
+    [[ -f "$BSP" ]] || die "Yocto rootfs not found: $BSP"
 
-    [[ -f "$BSP"      ]] || die "Yocto rootfs not found: $BSP"
-    [[ -f "$IMX_BOOT" ]] || die "imx-boot not found: $IMX_BOOT (use --imx-boot or put it in --images)"
+    # ---- Bootloader: the one artifact the secure-boot mode selects -----------
+    if [[ $IMX_BOOT_EXPLICIT -eq 1 ]]; then
+        IMX_BOOT="$(resolve_artifact "$IMX_BOOT")"
+        [[ -f "$IMX_BOOT" ]] || die "imx-boot not found: $IMX_BOOT"
+    else
+        IMX_BOOT="$(resolve_bootloader "$SECURE_BOOT_MODE")"
+        [[ -f "$IMX_BOOT" ]] || die "imx-boot not found: $IMX_BOOT (use --imx-boot or put it in --images)"
+    fi
+
+    SB_BOOTLOADER=0
+    if looks_signed_bootloader "$IMX_BOOT"; then SB_BOOTLOADER=1; fi
+
+    case "$SECURE_BOOT_MODE" in
+        on)
+            # Only reachable via --imx-boot, since resolve_bootloader() picks by name.
+            [[ $SB_BOOTLOADER -eq 1 ]] || die "--secure-boot but ${IMX_BOOT##*/} is not a signed-* file
+  Drop --imx-boot to let the mode pick $IMX_BOOT_SIGNED."
+            log "secure boot ON: writing ${IMX_BOOT##*/}"
+            ;;
+        off)
+            if [[ $SB_BOOTLOADER -eq 1 ]]; then
+                die "--no-secure-boot but ${IMX_BOOT##*/} is a signed bootloader
+  Drop --imx-boot to let the mode pick $IMX_BOOT_PLAIN."
+            fi
+            log "secure boot OFF: writing ${IMX_BOOT##*/} (plain card)"
+            ;;
+        *)
+            # Historical default: follow the bare imx-boot symlink and report what
+            # the build pointed it at, so the mode is at least visible.
+            log "secure boot mode: auto -> ${IMX_BOOT##*/} ($([[ $SB_BOOTLOADER -eq 1 ]] && echo SIGNED || echo unsigned))"
+            log "  (pass --secure-boot / --no-secure-boot to choose explicitly)"
+            ;;
+    esac
 
     # --ubuntu is optional: when omitted, the Yocto rootfs is the base.
     if [[ -n "$UBUNTU" ]]; then
@@ -475,22 +871,34 @@ main() {
         [[ -f "$UBUNTU" ]] || die "Ubuntu rootfs not found: $UBUNTU"
     fi
 
-    # Resolve --kernel, or auto-detect the plain kernel. The script treats the
-    # image as an opaque blob: to boot overlay-root, point --kernel at
-    # Image-initramfs-ecu150v2.bin yourself.
+    # ---- Kernel: not selected here, but enforced under an explicit mode ------
+    # Left alone by default -- the rootfs already carries the right /boot/Image
+    # for the build that made it (imx-image-core.bbappend covers all four toggle
+    # combinations). Under an explicit --secure-boot/--no-secure-boot, though,
+    # verify_rootfs_kernel() actively swaps in a matching-variant counterpart
+    # from --images when the rootfs shipped the wrong signedness (see the
+    # "Kernel selection" note near the top of the file). --kernel is an explicit
+    # override that always wins over that swap; its own signedness is validated
+    # right here, against whichever mode was requested.
     if [[ -n "$KERNEL_IMAGE" ]]; then
         KERNEL_IMAGE="$(resolve_artifact "$KERNEL_IMAGE")"
         [[ -f "$KERNEL_IMAGE" ]] || die "kernel image not found: $KERNEL_IMAGE"
-    else
-        local candidate
-        candidate="$(resolve_artifact "Image-ecu150v2.bin")"
-        if [[ -f "$candidate" ]]; then
-            KERNEL_IMAGE="$candidate"
-            log "auto-detected kernel: ${KERNEL_IMAGE##*/}"
-        else
-            warn "Image-ecu150v2.bin not found; /boot/Image will come from the rootfs tarball"
-            warn "But the default /boot/Image may support overlay when the OVERLAY_INITRAMFS_ROOT is enabled in bld-wayland/conf/local.conf`"
-            warn "  (pass --kernel for an explicit image, e.g. Image-initramfs-ecu150v2.bin)"
+        warn "--kernel given: /boot/Image from the rootfs will be REPLACED by ${KERNEL_IMAGE##*/}"
+        if [[ "$SECURE_BOOT_MODE" == "on" ]] && ! is_signed_kernel "$KERNEL_IMAGE"; then
+            err "--secure-boot with an unsigned --kernel: ${KERNEL_IMAGE##*/}"
+            err "  A signed bootloader authenticates the kernel on every boot, OPEN devices"
+            err "  included, so this will stop at 'Authenticate Image Fail'."
+            err "  Fix: drop --kernel and let the rootfs kernel be used, or point it at"
+            err "       signed-Image-ecu150v2.bin / signed-Image-initramfs-ecu150v2.bin."
+            [[ $ALLOW_UNSIGNED -eq 1 ]] || die "refusing (override: --allow-unsigned)"
+            warn "--allow-unsigned given: proceeding anyway"
+        fi
+        if [[ "$SECURE_BOOT_MODE" == "off" ]] && is_signed_kernel "$KERNEL_IMAGE"; then
+            die "--no-secure-boot with a SIGNED --kernel: ${KERNEL_IMAGE##*/}
+  A plain card must not carry any signed kernel -- this is a hard error, no
+  --allow-unsigned override. Point --kernel at an unsigned image
+  (Image-ecu150v2.bin / Image-initramfs-ecu150v2.bin), or drop --kernel and
+  let the rootfs kernel be auto-swapped to its unsigned counterpart instead."
         fi
     fi
 
@@ -526,9 +934,12 @@ main() {
     printf "  Layout mode : %s\n" "$([[ $RAUC -eq 1 ]] && echo 'RAUC A/B' || echo 'non-RAUC')" >&2
     printf "  Ubuntu base : %s\n" "${UBUNTU:-(none; using Yocto rootfs)}" >&2
     printf "  Yocto rootfs: %s\n" "$BSP" >&2
-    printf "  kernel Image: %s\n" "${KERNEL_IMAGE:-(from rootfs tarball)}" >&2
+    printf "  kernel Image: %s\n" "${KERNEL_IMAGE:-(keeping /boot/Image from the rootfs)}" >&2
     printf "  DTB         : %s\n" "${DTB_FILE:-(from rootfs tarball)}" >&2
     printf "  imx-boot    : %s  (@ %s KiB)\n" "$IMX_BOOT" "$IMX_BOOT_OFFSET_KB" >&2
+    printf "  secure boot : %s  (bootloader %s; kernel checked after extraction)\n" \
+        "$(case "$SECURE_BOOT_MODE" in on) echo 'ON  (--secure-boot)';; off) echo 'OFF (--no-secure-boot)';; *) echo 'auto';; esac)" \
+        "$([[ $SB_BOOTLOADER -eq 1 ]] && echo 'SIGNED' || echo 'unsigned')" >&2
     printf "  part start  : %s\n" "$PART_START" >&2
     if [[ $RAUC -eq 1 ]]; then
         printf "  partitions  : p1 rootfsA (%s), p2 rootfsB (%s), p3 /data (%s)%s\n" \
@@ -558,6 +969,10 @@ main() {
     mount "${DISK}${P}1" "$mnt"
 
     populate_rootfs "$mnt"
+
+    # Content-based secure-boot check on the kernel that will really boot. Placed
+    # before write_bootloader() so a refusal leaves the card without a bootloader.
+    verify_rootfs_kernel "$mnt"
 
     log "rootfs contents:"
     ls "$mnt" | sed 's/^/    /' >&2
@@ -598,6 +1013,18 @@ main() {
         fi
     fi
     echo "" >&2
+    if [[ $SB_BOOTLOADER -eq 1 ]]; then
+        echo "  Secure boot: ENABLED on this card" >&2
+        echo "    bootloader : ${IMX_BOOT##*/} (SIGNED)" >&2
+        echo "    /boot/Image: $([[ $SB_KERNEL -eq 1 ]] && echo SIGNED || echo unsigned)${ROOTFS_KERNEL_NAME:+ (${ROOTFS_KERNEL_NAME})}" >&2
+        echo "    On the U-Boot console, 'hab_status' must report No HAB Events Found!" >&2
+        echo "    before burning SRK_HASH or closing the device (both irreversible)." >&2
+        echo "" >&2
+    elif [[ $SB_KERNEL -eq 1 ]]; then
+        echo "  Secure boot: NOT active (unsigned bootloader; the signed kernel's IVT+CSF" >&2
+        echo "    is simply ignored by a non-HAB U-Boot). Use --secure-boot for a secure card." >&2
+        echo "" >&2
+    fi
     echo "  Remove the card, insert it into the ECU-150v2, and power on." >&2
 }
 

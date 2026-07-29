@@ -7,10 +7,25 @@ For downloading the source code and setting up the environment, follow the instr
 foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-ECU-150v2-manifest.git -b main -m ecu150v2-6.12.49-2.2.0.xml
 foo@bar:~/yocto$ repo sync
 foo@bar:~/yocto$ MACHINE=ecu150v2 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b bld-wayland
-foo@bar:~/yocto/bld-wayland$ bitbake-layers add-layer ../sources/meta-ecu-150v2/
+foo@bar:~/yocto/bld-wayland$ ../sources/meta-ecu-150v2/scripts/ecu150v2-setup.sh
 ```
 After the commands, not only was the Yocto project for ECU-150v2 downloaded, the operating console were also setup to operate bitbaker.
 Please also notice, that after the commands, your current position has been changed to the build directory!
+
+>[!IMPORTANT]
+> `ecu150v2-setup.sh` replaces the older single `bitbake-layers add-layer ../sources/meta-ecu-150v2/` step.
+> It adds **all** layers this product needs, in one idempotent command:
+> - `meta-ecu-150v2` — the product layer itself
+> - `meta-rauc` — required by the RAUC A/B OTA integration
+> - `meta-nxp-security-reference-design/meta-secure-boot` — **not optional**: `meta-ecu-150v2`
+>   carries a `linux-imx-signature` bbappend, and a bbappend whose target recipe is missing
+>   makes bitbake fail outright, even with `SECURE_BOOT_ENABLED = "0"`.
+>
+> **Re-run it after every `imx-setup-release.sh`.** That script restores
+> `conf/bblayers.conf` from `conf/bblayers.conf.org` and then appends only NXP's own
+> layers, so anything added by hand is silently dropped. Re-running `ecu150v2-setup.sh`
+> is harmless — each layer is added only when absent.
+
 If, in the future, to operate bitbake from another console; in that spacific console, use the command:
 ```console
 foo@bar:~/yocto$ source ./setup-environment bld-wayland
@@ -332,7 +347,7 @@ fi
 
 ## RAUC OTA (A/B update)
 
-`meta-ecu150v2` includes built-in RAUC A/B OTA support. All RAUC-related variables are centralized in `conf/include/ecu150v2-rauc.inc`. A single toggle in `local.conf`, combined with a one-time key generation, is all that is needed to build and deploy OTA bundles.
+`meta-ecu-150v2` includes built-in RAUC A/B OTA support. All RAUC-related variables are centralized in `conf/include/ecu150v2-rauc.inc`. A single toggle in `local.conf`, combined with a one-time key generation, is all that is needed to build and deploy OTA bundles.
 
 ### 1. Enable / Disable RAUC
 
@@ -357,7 +372,7 @@ foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/ca.cert.pem             
 foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/development-1.cert.pem         dev.cert.pem
 foo@bar:~/.config/rauc-keys-ecu150v2$ cp openssl-ca/dev/private/development-1.key.pem  dev.key.pem
 foo@bar:~/.config/rauc-keys-ecu150v2$ chmod 600 *.key.pem
-foo@bar:~/.config/rauc-keys-ecu150v2$ cp ca.cert.pem <yocto>/sources/meta-ecu150v2/recipes-core/rauc/files/ca.cert.pem
+foo@bar:~/.config/rauc-keys-ecu150v2$ cp ca.cert.pem <yocto>/sources/meta-ecu-150v2/recipes-core/rauc/files/ca.cert.pem
 ```
 
 > The bundle recipe defaults to `${HOME}/.config/rauc-keys-ecu150v2/` via `?=`. To use a different path (CI / HSM), override `RAUC_KEYS_DIR = "..."` in `local.conf`.
@@ -443,7 +458,7 @@ root@ecu150v2:~$ rauc status                       # booted from rootfs.1
 
 ### 6. Identifying bundle versions
 
-The bundle recipe defaults to `RAUC_BUNDLE_VERSION = "${DATETIME}"`. After installation, `rauc status` displays the `bundle-version` per slot. To embed additional metadata (e.g. git hash, build ID), edit `meta-ecu150v2/recipes-core/bundles/update-bundle.bb`.
+The bundle recipe defaults to `RAUC_BUNDLE_VERSION = "${DATETIME}"`. After installation, `rauc status` displays the `bundle-version` per slot. To embed additional metadata (e.g. git hash, build ID), edit `meta-ecu-150v2/recipes-core/bundles/update-bundle.bb`.
 
 ---
 
@@ -549,7 +564,7 @@ root@ecu150v2:~$ rauc --debug install http://<server-ip>:8080/update-bundle-ecu1
 
 ## Immutable OS (overlayfs via initramfs)
 
-`meta-ecu150v2` includes optional OverlayFS-root support. When enabled, the real rootfs is mounted **read-only** as the overlay lower layer, and all writes defaultly land on a volatile tmpfs (wiped on reboot).
+`meta-ecu-150v2` includes optional OverlayFS-root support. When enabled, the real rootfs is mounted **read-only** as the overlay lower layer, and all writes defaultly land on a volatile tmpfs (wiped on reboot).
 
 It is implemented with a standard **initramfs + switch_root** flow: an `overlay-init` script (PID 1) mounts the read-only rootfs, stacks an overlayfs on top, then hands off to the real `/sbin/init`. The initramfs is bundled into the kernel `Image` (CPIO fromat), so U-Boot keeps using the same `booti ${loadaddr} - ${fdt_addr}` command.
 
@@ -667,4 +682,270 @@ real rootfs read-write.
 > [!NOTE]
 > This is a development convenience only. Production images should always boot with the
 > overlay active so the rootfs stays immutable and power-loss-safe.
+
+## Secure Boot (HABv4)
+
+`meta-ecu-150v2` includes built-in HABv4 secure boot: one switch signs both the
+bootloader and the kernel. Variables are centralized in `conf/include/ecu150v2-secure-boot.inc`.
+
+### 1. Make sure the required layer is present
+
+`meta-secure-boot` is a **hard prerequisite** (`meta-ecu-150v2` carries a bbappend
+targeting it; without the layer, bitbake fails outright). It is already added by the
+setup step at the top of this document — re-run it after every `imx-setup-release.sh`
+(that script resets `bblayers.conf` on each run):
+
+```console
+foo@bar:~/yocto/bld-wayland$ ../sources/meta-ecu-150v2/scripts/ecu150v2-setup.sh
+```
+
+### 2. One-time: generate signing keys (**never store inside the layer**)
+
+Two directories are involved, and they are deliberately kept separate:
+
+| Variable | Default | Contents |
+|---|---|---|
+| `SIG_TOOL_PATH` | `${HOME}/.config/cst` | the NXP CST tool — public, shareable, replaceable |
+| `SIG_DATA_PATH` | `${HOME}/.config/hab-keys-ecu150v2` | **your** `keys/`, `crts/` and `csf_hab4.cfg` — secret, per-product, irreplaceable |
+
+**a) Install CST and generate the PKI tree**
+
+```console
+foo@bar:~$ tar xf <NXP's IMX_CST_TOOL>.tgz -C ~/tools/
+foo@bar:~$ ln -s ~/tools/cst-3.4.1 ${HOME}/.config/cst
+foo@bar:~$ cd ${HOME}/.config/cst/keys
+foo@bar:~/.config/cst/keys$ echo "12345678" > serial              # certificate serial seed
+foo@bar:~/.config/cst/keys$ printf "my_pass\nmy_pass\n" > key_pass.txt   # private key password, twice
+foo@bar:~/.config/cst/keys$ ./hab4_pki_tree.sh                    # interactive
+```
+
+**b) Generate the SRK table and the eFuse hash**
+
+```console
+foo@bar:~$ cd ${HOME}/.config/cst/crts
+foo@bar:~/.config/cst/crts$ ../linux64/bin/srktool -h 4 -d sha256 -f 1 \
+    -t SRK_1_2_3_4_table.bin -e SRK_1_2_3_4_fuse.bin \
+    -c ./SRK1_sha256_2048_65537_v3_ca_crt.pem,./SRK2_sha256_2048_65537_v3_ca_crt.pem,./SRK3_sha256_2048_65537_v3_ca_crt.pem,./SRK4_sha256_2048_65537_v3_ca_crt.pem
+```
+
+> No space after the commas in `-c` (UG10106 4.1.3). `SRK_1_2_3_4_fuse.bin` holds the
+> hash you will burn into the eFuses in step 6.
+
+**c) Copy the keys into this product's key directory**
+
+```console
+foo@bar:~$ export KEYS=${HOME}/.config/hab-keys-ecu150v2
+foo@bar:~$ mkdir -p ${KEYS} && chmod 700 ${KEYS}
+foo@bar:~$ cp -r ${HOME}/.config/cst/keys ${HOME}/.config/cst/crts ${KEYS}/
+```
+
+**d) `csf_hab4.cfg` — not needed to get started, but required before you close a device**
+
+This file answers *"which key signs the image"*. You do **not** have to write it to get a
+signed build going: if `${SIG_DATA_PATH}/csf_hab4.cfg` (and `csf_hab4_pkcs11.cfg`) are
+absent, `imx-boot-signature.bb` automatically uses NXP's bundled
+`csf_hab4.cfg.sample`, which already points at the standard CST certificate names. So for
+bring-up and `hab_status` testing you can skip this step entirely.
+
+The catch is the `Unlock` section. The sample declares it but leaves it **empty**:
+
+```ini
+#Unlock
+unlock_engine=
+unlock_features=
+unlock_uid=
+```
+
+On i.MX8MP those two blanks must become `CAAM` / `MID` (see the CAUTION below), and that
+only matters at the moment you **close the device** — which is irreversible. Hence the
+two workable orders of work:
+
+| When | What to do |
+|---|---|
+| While testing (device still open) | Do nothing. Let the build use the sample; verify `hab_status` reports no events. |
+| **Before closing the device** | Supply your own `csf_hab4.cfg` with the `Unlock` fields filled in, rebuild, reflash, re-verify — *then* burn fuses and close. |
+
+To supply your own copy, start from the sample **that your own build produced**. Do not
+download it from GitHub: `nxp-imx-signer.bb` pins `SRCREV`, so the file on the upstream
+`master` branch can drift away from the one your signer actually understands.
+
+```console
+foo@bar:~$ export KEYS=${HOME}/.config/hab-keys-ecu150v2
+foo@bar:~/yocto/bld-wayland$ cp tmp/deploy/images/ecu150v2/imx-boot-tools/csf_hab4.cfg.sample \
+    ${KEYS}/csf_hab4.cfg
+```
+
+> That copy is deployed by `nxp-imx-signer.bb`, so it appears once you have built at least
+> once — which you will have done already, since this step comes after bring-up testing.
+> On a tree that has never been built, unpack just that recipe to get the same file at
+> `tmp/work/x86_64-linux/nxp-imx-signer-native/*/git/csf_hab4.cfg.sample`:
+>
+> ```console
+> foo@bar:~/yocto/bld-wayland$ bitbake -c unpack nxp-imx-signer-native
+> ```
+
+Then edit the copy:
+
+**1. Fill in the `Unlock` fields:**
+
+```diff
+ #Unlock
+-unlock_engine=
+-unlock_features=
++unlock_engine=CAAM
++unlock_features=MID
+ unlock_uid=
+```
+
+**2. Make the certificate names match your own PKI.** Compare against `ls ${KEYS}/crts/`
+and adjust `srktable_file`, `csfk_file` and `img_file` if your CST run produced different
+names (a key type or length other than `sha256_2048_65537_v3` changes them). Leave
+`unlock_uid=` and `nocak_file=` empty — they must still be present.
+
+> [!NOTE]
+> **Bare file names only — never prefix with `crts/`.** The signer already hardcodes the
+> directory (`<SIG_DATA_PATH>/crts/<name>` for certificates, `<SIG_DATA_PATH>/keys/<name>`
+> for private keys). A `crts/` prefix resolves to `crts/crts/` and fails.
+
+### 3. Enable / Disable
+
+Edit `bld-wayland/conf/local.conf`:
+
+```sh
+# Enable HABv4 secure boot (default: disabled)
+SECURE_BOOT_ENABLED = "1"
+
+# Only needed when deviating from the directory convention in step 2:
+#SIG_TOOL_PATH = "/path/to/cst-3.4.1"
+#SIG_DATA_PATH = "/path/to/product-keys"
+```
+
+Set to `"0"` (or omit the line) to go back to an unsigned build: the signing
+`MACHINE_FEATURES` are removed, `imx-boot` and the kernel are deployed unsigned, and none
+of the key directories are touched. The build target stays `imx-image-core` either way.
+
+> [!TIP]
+> With `SECURE_BOOT_ENABLED = "1"`, `SIG_TOOL_PATH` and `SIG_DATA_PATH` are validated at
+> parse time, so a missing CST or key directory stops the build early. Note that the
+> presence of `csf_hab4.cfg` is deliberately **not** checked — blocking it would also
+> break PKCS#11 / HSM setups, which legitimately use `csf_hab4_pkcs11.cfg` instead. Getting
+> that file right is on you (step 2d).
+
+### 4. Build
+
+```console
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
+```
+
+### 5. Flash
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images bld-wayland/tmp/deploy/images/ecu150v2 \
+    --secure-boot \
+    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+> [!NOTE]
+> Add `--rauc` / `--overlay-data` as needed — see [`tools/flash/README.md`](tools/flash/README.md).
+
+### 6. Verify before burning fuses
+
+Boot the signed image and interrupt autoboot. While the device is still **open**, HAB
+already processes the CSF and reports any problem it found — so this is your only chance
+to catch a bad signature without consequences:
+
+```console
+=> hab_status
+
+Secure boot disabled
+
+HAB Configuration: 0xf0, HAB State: 0x66
+No HAB Events Found!
+```
+
+> [!CAUTION]
+> Everything from here on is **irreversible**. eFuses are one-way: a wrong SRK hash or a
+> premature close leaves you with a board that will only accept images signed by a PKI you
+> may no longer have. Do steps 7–9 on a sacrificial board first.
+
+### 7. Burn `SRK_HASH` (device still open)
+
+Read the eight 32-bit words out of the fuse binary produced in step 2b:
+
+```console
+foo@bar:~$ hexdump -e '/4 "0x"' -e '/4 "%X""\n"' \
+    ${HOME}/.config/hab-keys-ecu150v2/crts/SRK_1_2_3_4_fuse.bin
+0x9A842534
+0xB0491AB4
+0xD5B6A07B
+0xFD92DCE7
+0xC10DC87C
+0xD8BD04A9
+0x704E9FE4
+0x9B025359
+```
+
+On i.MX8MP the SRK hash lives in fuse **bank 6 (words 0–3)** and **bank 7 (words 0–3)**,
+in that order. Substitute your own values — the ones below are an example:
+
+```console
+=> fuse prog -y 6 0 0x9A842534
+=> fuse prog -y 6 1 0xB0491AB4
+=> fuse prog -y 6 2 0xD5B6A07B
+=> fuse prog -y 6 3 0xFD92DCE7
+=> fuse prog -y 7 0 0xC10DC87C
+=> fuse prog -y 7 1 0xD8BD04A9
+=> fuse prog -y 7 2 0x704E9FE4
+=> fuse prog -y 7 3 0x9B025359
+```
+
+> The bank/word layout above is not ECU-150v2 specific — it is the standard i.MX8M family
+> mapping documented by NXP in the U-Boot HABv4 guide, §1.7 "Programming SRK Hash":
+> <https://github.com/nxp-imx/uboot-imx/blob/lf_v2025.04/doc/imx/habv4/guides/mx8m_secure_boot.txt>
+> (This manifest, so far, uses u-boot-imx v2025.04, and the guide should be stable across releases).
+
+Read them back and confirm they match exactly:
+
+```console
+=> fuse read 6 0 4
+=> fuse read 7 0 4
+```
+
+Then **reboot and run `hab_status` again**. It must still report `No HAB Events Found!`.
+This second check is not redundant: from HAB 4.1.2 onwards, a non-zero SRK fuse makes HAB
+actually compare the SRK table in your image against the burnt hash even while the device
+is open. A mismatch shows up here — the last point at which it is still recoverable.
+
+### 8. Close the device
+
+Before running the command below, confirm all of the following:
+
+- `hab_status` reports `No HAB Events Found!` **after** the SRK hash was burnt (step 7)
+- The image on the board is the signed one
+- You still have the PKI (`keys/`, `crts/`) backed up somewhere safe — without it you
+  can never sign another image for this board
+
+Closing is done by programming the `SEC_CONFIG[1]` fuse (bank 1, word 3, bit 25):
+
+```console
+=> fuse prog 1 3 0x2000000
+```
+
+> Source: U-Boot HABv4 guide §1.9 "Closing the device"
+> (<https://github.com/nxp-imx/uboot-imx/blob/lf_v2025.04/doc/imx/habv4/guides/mx8m_secure_boot.txt>).
+> (This manifest, so far, uses u-boot-imx v2025.04, and the guide should be stable across releases).
+
+Reboot and confirm the device is now closed:
+
+```console
+=> hab_status
+
+Secure boot enabled
+
+HAB Configuration: 0xcc, HAB State: 0x99
+No HAB Events Found!
+```
+
 
