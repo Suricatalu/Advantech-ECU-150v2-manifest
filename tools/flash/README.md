@@ -8,8 +8,9 @@ A single script covers every supported layout combination:
   kernel modules / firmware overlaid on top.
 - **Boot mode**: plain single-rootfs, or RAUC A/B (`--rauc`).
 - **Root filesystem**: normal read-write, or immutable OverlayFS root (by booting the
-  initramfs-bundled kernel), optionally with a dedicated persistent overlay partition
-  (`--overlay-data`).
+  initramfs-bundled kernel).
+- **Application data**: optionally a dedicated `appdata` partition (`--appdata`), for
+  whatever the product needs to keep apart from the rootfs.
 - **Secure boot**: HABv4 signed or plain, chosen explicitly with
   `--secure-boot` / `--no-secure-boot` (see [Secure boot](#secure-boot-habv4)).
 
@@ -82,10 +83,11 @@ is **not** produced by Yocto — build it separately (see the manifest README
 | `-N, --no-secure-boot` | Write the **unsigned** bootloader — a plain card, even from a secure deploy dir; `/boot/Image` is guaranteed **unsigned** too (auto-swapped from `--images` if needed). |
 | `-k, --kernel <file>` | Override `/boot/Image`, bypassing the auto-swap above. **Not needed for a Yocto rootfs** — see below. |
 | `-D, --dtb <file>` | Device tree (auto: `imx8mp-evk-ecu150v2.dtb`). |
-| `-R, --rauc` | RAUC A/B layout (`p1` rootfsA, `p2` rootfsB, `p3` /data, `[p4]` overlay). |
-| `-O, --overlay-data` | Add a trailing ext4 partition for a **persistent** overlay upper/work. |
+| `-R, --rauc` | RAUC A/B layout: a second rootfs slot plus a `data` partition. |
+| `-A, --appdata[=SIZE]` | Add an ext4 `appdata` partition (default `2GiB`). See [Application data partition](#application-data-partition---appdata). |
 | `--rootfs-size <sz>` | Size of each rootfs partition (default `6GiB`). |
-| `--data-size <sz>` | RAUC `/data` partition size (default `1GiB`). |
+| `--data-size <sz>` | RAUC `data` partition size (default `1GiB`). |
+| `--appdata-size <sz>` | `appdata` partition size (default `2GiB`). |
 | `-B, --imx-boot <file>` | Explicit bootloader path; overrides what the secure-boot mode would pick. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--allow-unsigned` | Proceed even with a signed bootloader + unsigned kernel. That pair **does not boot** — debug only. See [Secure boot](#secure-boot-habv4). |
@@ -288,31 +290,97 @@ foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
 
 ---
 
+## Scenario 10 — Yocto rootfs + Appdata
+
+Plain single rootfs, no RAUC, just an extra partition for application data:
+
+```
+p1  ext4  rootfs
+p2  ext4  appdata    (empty; for application data)
+```
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images "$IMAGES_DIR" \
+    --appdata \
+    --yocto imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+> [!TIP]
+> This partition can be LUKS-encrypted: point `LUKS_DATA_DEVICE = "part:2"` at it (see
+> [Application data partition](#application-data-partition---appdata) for how the number
+> is derived). The flash tool has no part in this — it only formats a plain ext4
+> partition, which `cryptsetup luksFormat` then overwrites on first boot.
+
+---
+
 ## Scenario matrix
 
 Note how few flags there are: overlay needs none at flash time (the build decides it),
 and secure boot needs exactly one.
 
-| # | Scenario | `--ubuntu` | `--rauc` | `--kernel` | `--secure-boot` | Partitions |
-| --- | --- | :---: | :---: | :---: | :---: | --- |
-| 1 | Ubuntu | yes | | | | `p1` |
-| 2 | Ubuntu + Overlay | yes | | **yes** | | `p1` |
-| 3 | Yocto + Overlay | | | | | `p1` |
-| 4 | Yocto + RAUC | | yes | | | `p1 p2 p3` |
-| 5 | Yocto + RAUC + Overlay | | yes | | | `p1 p2 p3` |
-| 6 | Yocto + **Secure boot** | | | | **yes** | `p1` |
-| 7 | Yocto + Overlay + **Secure boot** | | | | **yes** | `p1` |
-| 8 | Yocto + RAUC + **Secure boot** | | yes | | **yes** | `p1 p2 p3` |
-| 9 | Yocto + RAUC + Overlay + **Secure boot** | | yes | | **yes** | `p1 p2 p3` |
+| # | Scenario | `--ubuntu` | `--rauc` | `--kernel` | `--appdata` | `--secure-boot` | Partitions |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | --- |
+| 1 | Ubuntu | yes | | | | | `p1` |
+| 2 | Ubuntu + Overlay | yes | | **yes** | | | `p1` |
+| 3 | Yocto + Overlay | | | | | | `p1` |
+| 4 | Yocto + RAUC | | yes | | | | `p1 p2 p3` |
+| 5 | Yocto + RAUC + Overlay | | yes | | | | `p1 p2 p3` |
+| 6 | Yocto + **Secure boot** | | | | | **yes** | `p1` |
+| 7 | Yocto + Overlay + **Secure boot** | | | | | **yes** | `p1` |
+| 8 | Yocto + RAUC + **Secure boot** | | yes | | | **yes** | `p1 p2 p3` |
+| 9 | Yocto + RAUC + Overlay + **Secure boot** | | yes | | | **yes** | `p1 p2 p3` |
+| 10 | Yocto + **Appdata** | | | | **yes** | | `p1 p2` |
 
-Add `--secure-boot` to **any** row to flash the signed bootloader; add `--overlay-data`
-to any row to make overlay writes persistent instead of tmpfs. The two are independent
-of each other and of RAUC — the build signs the initramfs-bundled kernel via
+Add `--secure-boot` to **any** row to flash the signed bootloader; add `--appdata` to
+any row for an extra data partition. Both are independent of each other and of RAUC —
+the build signs the initramfs-bundled kernel via
 `meta-ecu-150v2/recipes-secure-boot/linux/linux-imx-signature.bbappend`, so a signed
 RAUC bundle keeps secure boot working after an OTA to slot B.
 
 `--yocto <rootfs tarball>` is required in **all** scenarios (it provides the kernel
 modules / firmware, and is the rootfs base whenever `--ubuntu` is omitted).
+
+---
+
+## Application data partition (`--appdata`)
+
+`--appdata` adds one more ext4 partition, formatted and labelled `appdata` exactly like
+every other one. **Nothing is written to it** — what it becomes is up to whoever owns
+it (plain application data, a database, a LUKS container, ...); the flash tool has no
+opinion and never mentions any of them. See
+[Scenario 10](#scenario-10--yocto-rootfs--appdata) for pairing it with LUKS.
+
+### Partitions are addressed by number, and the number moves
+
+Partitions are laid out in a fixed order, and **the last one always takes the rest of
+the disk**:
+
+```
+p1     rootfs             (rootfs A with --rauc)
+[pN]   rootfs B           --rauc
+[pN]   data               --rauc
+[pN]   appdata            --appdata          (always last)
+```
+
+So `appdata` lands on a different number depending on the flags — but only on
+`--rauc`:
+
+| Flags | `appdata` is |
+| --- | :---: |
+| `--appdata` | `p2` |
+| `--rauc --appdata` | `p4` |
+
+> [!IMPORTANT]
+> The script prints the number it actually produced at the end of every run — read it
+> instead of deriving it, and keep whatever consumes the partition (e.g.
+> `LUKS_DATA_DEVICE`) in sync.
+
+> [!CAUTION]
+> The `appdata` ext4 label is a flashing-time convenience only. Anything that reformats
+> the partition (`mkfs`, `cryptsetup luksFormat`, ...) overwrites the superblock and the
+> label disappears — never rely on `/dev/disk/by-label/appdata` to find it later.
 
 ---
 
