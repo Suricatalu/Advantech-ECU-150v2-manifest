@@ -9,17 +9,22 @@
 # ext4 partition for the overlayfs upper/work dirs (kernel cmdline
 # overlayrwdev=/dev/mmcblkXpN).
 #
-# Partition layouts (NO separate boot partition; p1 starts at the rootfs):
+# Partition layout (NO separate boot partition; p1 starts at the rootfs).
+# The table is built as an ORDERED LIST, so any flag combination works:
 #
-#   non-RAUC (default):
-#     p1  ext4  rootfs              (/boot/Image + /boot/*.dtb live here)
-#     p2  ext4  overlay rwdata      (optional, --overlay-data; else tmpfs)
+#   p1    rootfs           (or rootfs A when --rauc)
+#  [pN]   rootfs B         only with --rauc
+#  [pN]   data             only with --rauc  (RAUC status + shared data)
+#  [pN]   appdata          only with --appdata
+#  [pN]   overlay rwdata   only with --overlay-data (always LAST)
 #
-#   RAUC (--rauc):
-#     p1  ext4  rootfs A            (populated by this script)
-#     p2  ext4  rootfs B            (left empty; filled later by 'rauc install')
-#     p3  ext4  /data               (RAUC status + persistent data, A/B shared)
-#     p4  ext4  overlay rwdata      (optional, --overlay-data; else tmpfs)
+# Every partition gets its nominal size except the LAST one, which takes the
+# rest of the disk. That is the pre-existing behaviour and it is preserved.
+#
+# ORDER IS PART OF THE INTERFACE. Consumers address these partitions BY NUMBER,
+# so reordering the list silently breaks them -- nothing here would report an
+# error. The final summary prints the numbers this run actually produced; see
+# tools/flash/README.md for the flags -> number table.
 #
 #   imx-boot is always written raw at 32 KiB, before p1 (no boot partition).
 #
@@ -163,10 +168,12 @@ PART_START="8MiB"           # rootfs partition starts after the bootloader gap
 WIPE_MIB=16                 # zero the first N MiB to clear old tables/bootloader
 KERNEL_IMAGE=""             # explicit kernel image; auto-detected when empty
 DTB_FILE=""                 # explicit DTB file; auto-detected when empty
-RAUC=0                     # 1 = RAUC A/B layout (p1 A, p2 B, p3 /data, p4 overlay)
+RAUC=0                     # 1 = RAUC A/B layout (rootfs A + B + data)
 OVERLAY_DATA=0             # 1 = add an ext4 partition for overlay upper/work (last part)
+APPDATA=0                  # 1 = add an ext4 application-data partition
 ROOTFS_SIZE="6GiB"         # size of EACH rootfs partition (non-RAUC p1; RAUC each A/B slot)
-DATA_SIZE="1GiB"           # RAUC /data partition size (p3)
+DATA_SIZE="1GiB"           # RAUC data partition size
+APPDATA_SIZE="2GiB"        # --appdata partition size
 RWDATA_LABEL="rwdata"      # filesystem label of the overlay data partition
 SECURE_BOOT_MODE="auto"    # auto | on (--secure-boot) | off (--no-secure-boot)
 
@@ -217,10 +224,15 @@ Optional:
                           checked against an explicit mode).
   -D, --dtb <file>        DTB -> /boot (auto: imx8mp-evk-ecu150v2.dtb)
   -B, --imx-boot <file>   explicit bootloader path; overrides the mode's choice
-  -R, --rauc              RAUC A/B layout (p1 rootfsA, p2 rootfsB, p3 /data, [p4 overlay])
+  -R, --rauc              RAUC A/B layout (rootfs A + rootfs B + data partition)
   -O, --overlay-data      add an ext4 partition for overlay upper/work (last partition)
+  -A, --appdata[=SIZE]    add an ext4 application-data partition (default: 2GiB).
+                          Just a partition: mkfs'd like every other one, and
+                          nothing is written to it. Whoever owns it decides what
+                          it becomes -- this tool does not care.
   --rootfs-size <sz>      size of each rootfs partition (default: 6GiB)
-  --data-size <sz>        RAUC /data partition size (default: 1GiB; --rauc only)
+  --data-size <sz>        RAUC data partition size (default: 1GiB; --rauc only)
+  --appdata-size <sz>     application-data partition size (default: 2GiB)
   --offset <kb>           imx-boot raw offset in KiB (default: 32)
   --part-start <sz>       first partition start (default: 8MiB)
   -y, --yes               do not prompt for confirmation
@@ -251,17 +263,21 @@ How the secure-boot mode is applied:
   leaves a card with no bootloader instead of a subtly broken one.
 
 Partition design (NO separate boot partition; imx-boot is raw at 32 KiB,
-p1 starts directly at the rootfs):
+p1 starts directly at the rootfs). Built as an ORDERED LIST, so any flag
+combination works:
 
-  non-RAUC (default):
-    p1  rootfs                         (/boot/Image + /boot/*.dtb)
-    p2  overlay rwdata                 (only with --overlay-data; else tmpfs)
+    p1    rootfs                       (/boot/Image + /boot/*.dtb; rootfs A with --rauc)
+   [pN]   rootfs B                     only with --rauc (empty; 'rauc install' fills it)
+   [pN]   data                         only with --rauc (RAUC status + shared data)
+   [pN]   appdata                      only with --appdata
+   [pN]   overlay rwdata               only with --overlay-data (always LAST)
 
-  RAUC (--rauc):
-    p1  rootfs A                       (flashed now)
-    p2  rootfs B                       (empty; populated by 'rauc install')
-    p3  /data                          (RAUC status records + shared data)
-    p4  overlay rwdata                 (only with --overlay-data; else tmpfs)
+  Every partition gets its nominal size except the LAST one, which takes the
+  rest of the disk.
+
+  ORDER IS PART OF THE INTERFACE: consumers address these BY NUMBER, so the
+  numbers shift when you change flags. The final summary prints the numbers this
+  run actually produced -- read it, do not guess.
 EOF
     exit "${1:-0}"
 }
@@ -472,10 +488,67 @@ cleanup() {
 # ----------------------------------------------------------------------------
 # Core steps
 # ----------------------------------------------------------------------------
-# Partition the disk. No separate boot partition: imx-boot is raw at 32 KiB, so
-# p1 starts directly at the rootfs (default PART_START = 8 MiB).
-#   non-RAUC: p1 rootfs [, p2 overlay rwdata]
-#   RAUC:     p1 rootfs A, p2 rootfs B, p3 /data [, p4 overlay rwdata]
+# Build the partition table as an ordered list. Three parallel arrays, one entry
+# per partition, index+1 == partition number. Everything downstream (mkfs, both
+# summaries, the overlay bootargs hint) walks this list, so a layout change can
+# never drift out of sync with what gets printed.
+PART_LABEL=()   # ext4 label
+PART_SIZE=()    # size in MiB, or "REST" for the last entry
+PART_DISP=()    # size as shown to the user
+PART_NOTE=()    # what the partition is for
+
+plan_partitions() {
+    PART_LABEL=(); PART_SIZE=(); PART_DISP=(); PART_NOTE=()
+
+    if [[ $RAUC -eq 1 ]]; then
+        PART_LABEL+=("rootfs_a"); PART_SIZE+=("$(to_mib "$ROOTFS_SIZE")")
+        PART_DISP+=("$ROOTFS_SIZE"); PART_NOTE+=("rootfs A, /boot/Image + dtb (flashed)")
+        PART_LABEL+=("rootfs_b"); PART_SIZE+=("$(to_mib "$ROOTFS_SIZE")")
+        PART_DISP+=("$ROOTFS_SIZE"); PART_NOTE+=("rootfs B (empty; 'rauc install' populates it)")
+        PART_LABEL+=("data");     PART_SIZE+=("$(to_mib "$DATA_SIZE")")
+        PART_DISP+=("$DATA_SIZE"); PART_NOTE+=("RAUC status + persistent data")
+    else
+        PART_LABEL+=("rootfs");   PART_SIZE+=("$(to_mib "$ROOTFS_SIZE")")
+        PART_DISP+=("$ROOTFS_SIZE"); PART_NOTE+=("rootfs, /boot/Image + dtb")
+    fi
+
+    if [[ $APPDATA -eq 1 ]]; then
+        PART_LABEL+=("appdata"); PART_SIZE+=("$(to_mib "$APPDATA_SIZE")")
+        PART_DISP+=("$APPDATA_SIZE"); PART_NOTE+=("empty; for application data")
+    fi
+
+    if [[ $OVERLAY_DATA -eq 1 ]]; then
+        PART_LABEL+=("$RWDATA_LABEL"); PART_SIZE+=("0")
+        PART_DISP+=("rest"); PART_NOTE+=("overlay upper/work")
+    fi
+
+    # Pre-existing behaviour, kept deliberately: the last partition always takes
+    # the rest of the disk, whatever it happens to be.
+    local last=$(( ${#PART_SIZE[@]} - 1 ))
+    PART_SIZE[$last]="REST"
+    PART_DISP[$last]="rest"
+}
+
+# Echo the 1-based partition number carrying $1, or return 1 if there is none.
+part_num_of() {
+    local want="$1" i
+    for (( i = 0; i < ${#PART_LABEL[@]}; i++ )); do
+        if [[ "${PART_LABEL[i]}" == "$want" ]]; then printf '%s' "$((i + 1))"; return 0; fi
+    done
+    return 1
+}
+
+# The layout-affecting flags of this run, for the summary.
+layout_flags() {
+    local f=""
+    if [[ $RAUC -eq 1 ]];         then f+=" --rauc"; fi
+    if [[ $APPDATA -eq 1 ]];      then f+=" --appdata"; fi
+    if [[ $OVERLAY_DATA -eq 1 ]]; then f+=" --overlay-data"; fi
+    printf '%s' "${f:- (none)}"
+}
+
+# Partition the disk from the plan_partitions() list. No separate boot partition:
+# imx-boot is raw at 32 KiB, so p1 starts directly at the rootfs.
 partition_disk() {
     local disk="$1"
 
@@ -486,37 +559,22 @@ partition_disk() {
     dd if=/dev/zero of="$disk" bs=1M count="$WIPE_MIB" conv=fsync status=none
     sync
 
-    local start rootfs_mib data_mib e1 e2 e3
+    local i n start end
     start="$(to_mib "$PART_START")"
-    rootfs_mib="$(to_mib "$ROOTFS_SIZE")"
-    data_mib="$(to_mib "$DATA_SIZE")"
+    n=${#PART_LABEL[@]}
+
+    log "layout:$(layout_flags) -> ${n} partition(s)"
 
     parted -s "$disk" mklabel msdos
-
-    if [[ $RAUC -eq 1 ]]; then
-        e1=$(( start + rootfs_mib ))     # end of rootfs A
-        e2=$(( e1 + rootfs_mib ))        # end of rootfs B
-        e3=$(( e2 + data_mib ))          # end of /data
-        log "RAUC layout: p1 rootfsA (${ROOTFS_SIZE}), p2 rootfsB (${ROOTFS_SIZE}), p3 /data (${DATA_SIZE})$([[ $OVERLAY_DATA -eq 1 ]] && echo ', p4 overlay (rest)')"
-        parted -s "$disk" mkpart primary ext4 "${start}MiB" "${e1}MiB"   # rootfs A
-        parted -s "$disk" mkpart primary ext4 "${e1}MiB"    "${e2}MiB"   # rootfs B
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            parted -s "$disk" mkpart primary ext4 "${e2}MiB" "${e3}MiB"  # /data
-            parted -s "$disk" mkpart primary ext4 "${e3}MiB" 100%        # overlay rwdata
-        else
-            parted -s "$disk" mkpart primary ext4 "${e2}MiB" 100%        # /data (rest)
-        fi
-    else
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            e1=$(( start + rootfs_mib ))
-            log "non-RAUC layout: p1 rootfs (${ROOTFS_SIZE}), p2 overlay rwdata (rest)"
-            parted -s "$disk" mkpart primary ext4 "${start}MiB" "${e1}MiB"
-            parted -s "$disk" mkpart primary ext4 "${e1}MiB"    100%
-        else
-            log "non-RAUC layout: single rootfs partition (start ${PART_START})"
+    for (( i = 0; i < n; i++ )); do
+        if [[ "${PART_SIZE[i]}" == "REST" ]]; then
             parted -s "$disk" mkpart primary ext4 "${start}MiB" 100%
+        else
+            end=$(( start + PART_SIZE[i] ))
+            parted -s "$disk" mkpart primary ext4 "${start}MiB" "${end}MiB"
+            start=$end
         fi
-    fi
+    done
     parted -s "$disk" set 1 boot on
 
     # Let the kernel re-read the new table before mkfs.
@@ -525,25 +583,10 @@ partition_disk() {
     udevadm settle 2>/dev/null || true
     sleep 1
 
-    if [[ $RAUC -eq 1 ]]; then
-        log "formatting rootfs A ${disk}${P}1 (ext4, label rootfs_a)"
-        mkfs.ext4 -F -L rootfs_a "${disk}${P}1"
-        log "formatting rootfs B ${disk}${P}2 (ext4, label rootfs_b)"
-        mkfs.ext4 -F -L rootfs_b "${disk}${P}2"
-        log "formatting /data ${disk}${P}3 (ext4, label data)"
-        mkfs.ext4 -F -L data "${disk}${P}3"
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            log "formatting overlay rwdata ${disk}${P}4 (ext4, label ${RWDATA_LABEL})"
-            mkfs.ext4 -F -L "$RWDATA_LABEL" "${disk}${P}4"
-        fi
-    else
-        log "formatting rootfs partition ${disk}${P}1 (ext4)"
-        mkfs.ext4 -F -L rootfs "${disk}${P}1"
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            log "formatting overlay rwdata partition ${disk}${P}2 (ext4, label ${RWDATA_LABEL})"
-            mkfs.ext4 -F -L "$RWDATA_LABEL" "${disk}${P}2"
-        fi
-    fi
+    for (( i = 0; i < n; i++ )); do
+        log "formatting ${disk}${P}$((i + 1)) (ext4, label ${PART_LABEL[i]}, ${PART_DISP[i]})"
+        mkfs.ext4 -F -L "${PART_LABEL[i]}" "${disk}${P}$((i + 1))"
+    done
 }
 
 # Populate the rootfs partition. Two modes:
@@ -799,6 +842,8 @@ main() {
             -D|--dtb)           DTB_FILE="${2:-}"; shift 2 ;;
             -R|--rauc)          RAUC=1; shift ;;
             -O|--overlay-data)  OVERLAY_DATA=1; shift ;;
+            -A|--appdata)       APPDATA=1; shift ;;
+            --appdata=*)        APPDATA=1; APPDATA_SIZE="${1#*=}"; shift ;;
             -S|--secure-boot)    SECURE_BOOT_MODE="on"; shift ;;
             -N|--no-secure-boot) SECURE_BOOT_MODE="off"; shift ;;
             --secure-boot=*)
@@ -812,6 +857,7 @@ main() {
                 shift ;;
             --rootfs-size)      ROOTFS_SIZE="${2:-}"; shift 2 ;;
             --data-size)        DATA_SIZE="${2:-}"; shift 2 ;;
+            --appdata-size)     APPDATA_SIZE="${2:-}"; shift 2 ;;
             --offset)           IMX_BOOT_OFFSET_KB="${2:-}"; shift 2 ;;
             --part-start)       PART_START="${2:-}"; shift 2 ;;
             -y|--yes)           ASSUME_YES=1; shift ;;
@@ -941,15 +987,12 @@ main() {
         "$(case "$SECURE_BOOT_MODE" in on) echo 'ON  (--secure-boot)';; off) echo 'OFF (--no-secure-boot)';; *) echo 'auto';; esac)" \
         "$([[ $SB_BOOTLOADER -eq 1 ]] && echo 'SIGNED' || echo 'unsigned')" >&2
     printf "  part start  : %s\n" "$PART_START" >&2
-    if [[ $RAUC -eq 1 ]]; then
-        printf "  partitions  : p1 rootfsA (%s), p2 rootfsB (%s), p3 /data (%s)%s\n" \
-            "$ROOTFS_SIZE" "$ROOTFS_SIZE" "$DATA_SIZE" \
-            "$([[ $OVERLAY_DATA -eq 1 ]] && echo ", p4 rwdata (rest)")" >&2
-    elif [[ $OVERLAY_DATA -eq 1 ]]; then
-        printf "  partitions  : p1 rootfs (%s), p2 rwdata (rest, label %s)\n" "$ROOTFS_SIZE" "$RWDATA_LABEL" >&2
-    else
-        printf "  partitions  : p1 rootfs (whole disk)\n" >&2
-    fi
+    plan_partitions
+    local pi
+    for (( pi = 0; pi < ${#PART_LABEL[@]}; pi++ )); do
+        if [[ $pi -eq 0 ]]; then printf "  partitions  :" >&2; else printf "                " >&2; fi
+        printf " p%d %s (%s)\n" "$((pi + 1))" "${PART_LABEL[pi]}" "${PART_DISP[pi]}" >&2
+    done
     echo "==================================================" >&2
     warn "this will DESTROY ALL DATA on $DISK"
     if [[ $ASSUME_YES -ne 1 ]]; then
@@ -995,22 +1038,22 @@ main() {
     echo "" >&2
     echo "  Layout:" >&2
     echo "    imx-boot     @ ${IMX_BOOT_OFFSET_KB} KiB (raw)" >&2
-    if [[ $RAUC -eq 1 ]]; then
-        echo "    ${DISK}${P}1 (ext4) : rootfs A, /boot/Image + dtb (flashed)" >&2
-        echo "    ${DISK}${P}2 (ext4) : rootfs B (empty; 'rauc install' populates it)" >&2
-        echo "    ${DISK}${P}3 (ext4) : /data (RAUC status + persistent data)" >&2
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            echo "    ${DISK}${P}4 (ext4) : overlay rwdata (label ${RWDATA_LABEL})" >&2
-            echo "" >&2
-            echo "  For overlay root, set kernel bootargs: overlayrwdev=/dev/mmcblkXp4" >&2
-        fi
-    else
-        echo "    ${DISK}${P}1 (ext4) : rootfs, /boot/Image + dtb" >&2
-        if [[ $OVERLAY_DATA -eq 1 ]]; then
-            echo "    ${DISK}${P}2 (ext4) : overlay rwdata (label ${RWDATA_LABEL})" >&2
-            echo "" >&2
-            echo "  For overlay root, set kernel bootargs: overlayrwdev=/dev/mmcblkXp2" >&2
-        fi
+    local si num
+    for (( si = 0; si < ${#PART_LABEL[@]}; si++ )); do
+        printf "    %s%s%d (ext4) : %-9s %-5s %s\n" \
+            "$DISK" "$P" "$((si + 1))" \
+            "${PART_LABEL[si]}" "${PART_DISP[si]}" "${PART_NOTE[si]}" >&2
+    done
+    # Consumers address partitions BY NUMBER and the numbers move with the flags,
+    # so print the ones this run actually produced instead of a fixed guess.
+    if num="$(part_num_of appdata)"; then
+        echo "" >&2
+        echo "    appdata is partition ${num} (flags:$(layout_flags))" >&2
+        echo "    Change the flags -> the number changes. See README for the table." >&2
+    fi
+    if num="$(part_num_of "$RWDATA_LABEL")"; then
+        echo "" >&2
+        echo "    For overlay root, set kernel bootargs: overlayrwdev=/dev/mmcblkXp${num}" >&2
     fi
     echo "" >&2
     if [[ $SB_BOOTLOADER -eq 1 ]]; then

@@ -948,4 +948,69 @@ HAB Configuration: 0xcc, HAB State: 0x99
 No HAB Events Found!
 ```
 
+## LUKS + TPM (encrypted `/data` or `/appdata`)
+
+`meta-ecu-150v2` includes optional LUKS2 encryption for a data partition, unlocked
+automatically at boot by the on-board TPM. All variables are centralized in
+`conf/include/ecu150v2-luks.inc`.
+
+### 1. Enable / Disable
+
+Edit bld-wayland/conf/local.conf:
+
+```sh
+# Enable LUKS encryption (default: disabled)
+LUKS_DATA_ENABLED  = "1"
+# Which partition to encrypt -- NO DEFAULT
+LUKS_DATA_DEVICE = "part:N"
+# The default mountpoint for the decrypted partition (default: /appdata)
+LUKS_DATA_MOUNT  = "/appdata"
+```
+
+> [!IMPORTANT]
+> If `LUKS_DATA_DEVICE` targets the **same partition RAUC uses for `/data`** (`part:3`
+> in the `--rauc` layout), you **must** also set `LUKS_DATA_MOUNT = "/data"` in
+> `local.conf`. `rauc-setup-env.sh` hardcodes that partition to mount at `/data`;
+> leaving `LUKS_DATA_MOUNT` at its default (`/appdata`) makes RAUC's own state land on
+> an unrelated, unencrypted partition -- silently, with no error at boot. Encrypting a
+> separate `--appdata` partition instead needs no such change.
+
+> [!TIP]
+> `LUKS_DATA_KEY_MODE` defaults to `"tpm"`. The alternative, `"keyfile"`
+> (`LUKS_DATA_KEY_MODE = "keyfile"`), has **no security** — the key ships in plaintext
+> in every unit built from this image — and exists only for bring-up before the TPM
+> path is verified. See `conf/include/ecu150v2-luks.inc` for how to generate that key.
+
+### 2. Build and flash
+
+```console
+foo@bar:~/yocto/bld-wayland$ bitbake imx-image-core
+```
+
+Flash a card with a partition matching `LUKS_DATA_DEVICE` — either RAUC's own `part:3`
+(`--rauc`), or a dedicated one via `--appdata` (see
+[`tools/flash/README.md`](tools/flash/README.md)):
+
+```console
+foo@bar:~/yocto$ sudo ./tools/flash/ecu150v2_flash.sh \
+    --device /dev/sdX \
+    --images bld-wayland/tmp/deploy/images/ecu150v2 \
+    --appdata \
+    --yocto  imx-image-core-ecu150v2.rootfs.tar.zst
+```
+
+### 3. First boot and verification
+
+With the default `LUKS_DATA_AUTO_PROVISION = "1"`, the partition is formatted and
+enrolled with the TPM automatically on first boot — no manual step needed:
+
+```console
+root@ecu150v2:~$ journalctl -u ecu150v2-luks-data      # provisioning done
+root@ecu150v2:~$ mountpoint /appdata                   # or /data, per LUKS_DATA_MOUNT
+root@ecu150v2:~$ cryptsetup isLuks --type luks2 <target-partition> && echo "is LUKS"
+root@ecu150v2:~$ cryptsetup close data && cryptsetup open <target-partition> data
+# "data" here is the mapper name (LUKS_DATA_MAPPER, default "data" -> /dev/mapper/data),
+# not a placeholder. No password prompt on open = the TPM unlock is working.
+```
+
 
