@@ -1,10 +1,25 @@
 # Manifest of the Advantech Linux TSU Yocto project
 The goal of this project is to release opensource Linux source code that runs on Advantech Hardware
 
+>[!IMPORTANT]
+> **This is the `walnascar-cip` branch: ECU-150v2 on Yocto walnascar with the CIP kernel patches.**
+>
+> CIP (Civil Infrastructure Platform) is a Linux Foundation project that maintains selected
+> kernel series as Super Long Term Support (SLTS) kernels. 6.12 is one of them, published as
+> `v6.12.<sublevel>-cip<N>` tags. This branch keeps the NXP BSP and adds the CIP patches on
+> top of the NXP kernel, so the product kernel follows the CIP 6.12 SLTS updates.
+>
+> | Item | This branch (`walnascar-cip`) |
+> |---|---|
+> | Yocto release | walnascar (5.2) |
+> | NXP BSP | `rel_imx_6.12.49_2.2.0` (the manifest file name `ecu150v2-6.12.49-2.2.0.xml` refers to this BSP release) |
+>
+> For the NXP 6.12.49 kernel without the CIP patches, use the `main` branch of this manifest.
+
 ## Download the Yocto Linux for ECU-150v2 and setup environment variables
 For downloading the source code and setting up the environment, follow the instructions below:
 ```console
-foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-ECU-150v2-manifest.git -b main -m ecu150v2-6.12.49-2.2.0.xml
+foo@bar:~/yocto$ repo init -u https://github.com/saurontech/Advantech-ECU-150v2-manifest.git -b walnascar-cip -m ecu150v2-6.12.49-2.2.0.xml
 foo@bar:~/yocto$ repo sync
 foo@bar:~/yocto$ MACHINE=ecu150v2 DISTRO=fsl-imx-xwayland source ./imx-setup-release.sh -b bld-wayland
 foo@bar:~/yocto/bld-wayland$ ../sources/meta-ecu-150v2/scripts/ecu150v2-setup.sh
