@@ -39,7 +39,9 @@
   <!-- Required by meta-ecu-150v2: RAUC A/B OTA integration. -->
   <project name="meta-rauc" remote="rauc" path="sources/meta-rauc" revision="a0b83842d131093e89fa4fefaaa1997f05afdf62" upstream="walnascar" />
 
-  <project name="meta-ecu-150v2" remote="adv-tsu" path="sources/meta-ecu-150v2"/>
+  <!-- CIP branch: meta-ecu-150v2 walnascar-cip applies the CIP SLTS kernel
+       patches (recipes-kernel/linux/linux-imx/cip/) on top of NXP linux-imx 6.12.49. -->
+  <project name="meta-ecu-150v2" remote="adv-tsu" path="sources/meta-ecu-150v2" revision="walnascar-cip"/>
 
   <project name="meta-imx" remote="imx" path="sources/meta-imx" revision="refs/tags/rel_imx_6.12.49_2.2.0" upstream="walnascar-6.12.49-2.2.0">
      <linkfile src="tools/imx-setup-release.sh" dest="imx-setup-release.sh" />
